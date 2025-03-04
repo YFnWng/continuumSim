@@ -1,39 +1,34 @@
 import numpy as np
 import time
-
+    
 def hat(u):
-    if len(np.shape(u)) == 1:
-        return np.array([[0, -u[2], u[1]],
-                        [u[2], 0, -u[0]],
-                        [-u[1], u[0], 0]])
-    else:       
-        S = np.zeros((*np.shape(u),3))
-        S[...,0,1] = -u[...,2]
-        S[...,0,2] = u[...,1]
-        S[...,1,2] = -u[...,0]
-        S[...,1,0] = u[...,2]
-        S[...,2,0] = -u[...,1]
-        S[...,2,1] = u[...,0]
-        return S
-
+    S = np.zeros((*np.shape(u),3))
+    S[...,0,1] = -u[...,2]
+    S[...,0,2] = u[...,1]
+    S[...,1,2] = -u[...,0]
+    S[...,1,0] = u[...,2]
+    S[...,2,0] = -u[...,1]
+    S[...,2,1] = u[...,0]
+    return S
+    
 def Hat(u):
-    if len(np.shape(u)) == 1:
+    N = np.shape(u)
+    if len(N) == 1:
         return np.array([[0, -u[5], u[4], u[0]],
                         [u[5], 0, -u[3], u[1]],
                         [-u[4], u[3], 0, u[2]],
                         [0,     0,    0,    0]])
-    else:       
-        S = np.zeros((*np.shape(u)[0:-1],4,4))
-        S[...,0,1] = -u[...,5]
-        S[...,0,2] = u[...,4]
-        S[...,1,2] = -u[...,3]
-        S[...,1,0] = u[...,5]
-        S[...,2,0] = -u[...,4]
-        S[...,2,1] = u[...,3]
-        S[...,0,3] = u[...,0]
-        S[...,1,3] = -u[...,1]
-        S[...,2,3] = u[...,2]
-        return S
+    S = np.zeros((*(N[0:-1]),4,4))
+    S[...,0,1] = -u[...,5]
+    S[...,0,2] = u[...,4]
+    S[...,1,2] = -u[...,3]
+    S[...,1,0] = u[...,5]
+    S[...,2,0] = -u[...,4]
+    S[...,2,1] = u[...,3]
+    S[...,0,3] = u[...,0]
+    S[...,1,3] = u[...,1]
+    S[...,2,3] = u[...,2]
+    return S
 
 def ginv(g):
     ginv = np.zeros_like(g)
@@ -70,16 +65,20 @@ def expSE3(Psi):
     return np.concatenate((np.concatenate((expw, expv),axis=-1), 
                            np.concatenate((np.zeros((*N,1,3),), np.ones((*N,1,1),)),axis=-1)),axis=-2) # N x 4 x 4
 
-def expTSE3(Psi):
-    N = Psi.shape[0:-1]
+def expTdSE3(Psi, Psid):
+    # N = Psi.shape[0:-1]
     # v = Psi[...,0:3] # N x 3
-    # w = Psi[...,3:6] # N x 3
-    theta = np.linalg.norm(Psi[...,3:6], ord=2, axis=-1, keepdims=True) # N x 1
+    w = Psi[...,3:6] # N x 3
+    wd = Psid[...,3:6] # N x 3
+    theta = np.linalg.norm(w, ord=2, axis=-1, keepdims=True) # N x 1
     nonzeroidx = theta != 0 # theta >= 1e-2
-    # zeroidx = theta == 0
+    lim0 = np.zeros_like(theta)
+    # thetad = np.divide(np.inner(wd,w), theta, out=np.linalg.norm(wd, ord=2, axis=-1, keepdims=True), where=nonzeroidx)
+    thetad = np.divide(np.sum(wd*w, axis=-1, keepdims=True), theta, out=lim0, where=nonzeroidx)
 
     Psihat  = Hat(Psi)
     adjPsi  = ad(Psi)
+    adjPsid  = ad(Psid)
 
     Psihatp2 = Psihat@Psihat
     Psihatp3 = Psihatp2@Psihat
@@ -88,9 +87,13 @@ def expTSE3(Psi):
     adjPsip3 = adjPsip2@adjPsi
     adjPsip4 = adjPsip3@adjPsi
 
+    adjPsid2 = adjPsid@adjPsi + adjPsi@adjPsid
+    adjPsid3 = adjPsid2@adjPsi + adjPsip2@adjPsid
+    adjPsid4 = adjPsid3@adjPsi + adjPsip3@adjPsid
+
     limco = np.ones_like(theta)
-    I4 = np.tile(np.eye(4),(*N,1,1))
-    I6 = np.tile(np.eye(6),(*N,1,1))
+    # I4 = np.tile(np.eye(4),(*N,1,1))
+    # I6 = np.tile(np.eye(6),(*N,1,1))
         
     tp2        = theta*theta
     tp3        = tp2*theta
@@ -105,58 +108,108 @@ def expTSE3(Psi):
     
     a2 = np.divide(1-costheta, tp2, out=limco*1/2, where=nonzeroidx)
     a3 = np.divide(theta-sintheta, tp3, out=limco*1/6, where=nonzeroidx)
-    g  = I4 + Psihat + a2[...,None]*Psihatp2 + a3[...,None]*Psihatp3
+    g  = np.eye(4)[None,...] + Psihat + a2[...,None]*Psihatp2 + a3[...,None]*Psihatp3
 
-    # b1 = (4-4*costheta-t1)/(2*tp2)
     b1 = np.divide(4-4*costheta-t1, 2*tp2, out=limco*1/2, where=nonzeroidx)
-    # b2 = (4*theta-5*sintheta+t2)/(2*tp3)
     b2 = np.divide(4*theta-5*sintheta+t2, 2*tp3, out=limco*1/6, where=nonzeroidx)
-    # b3 = (2-2*costheta-t1)/(2*tp4)
     b3 = np.divide(2-2*costheta-t1, 2*tp4, out=limco*1/24, where=nonzeroidx)
-    # b4 = (2*theta-3*sintheta+t2)/(2*tp5)
     b4 = np.divide(2*theta-3*sintheta+t2, 2*tp5, out=limco*1/120, where=nonzeroidx)
-    Tg = I6 + b1[...,None]*adjPsi + b2[...,None]*adjPsip2 +\
+    dexpPsi = np.eye(6)[None,...] + b1[...,None]*adjPsi + b2[...,None]*adjPsip2 +\
         b3[...,None]*adjPsip3 + b4[...,None]*adjPsip4
+    
+    tp6 = tp5*theta
+    t3 = (-8+(8-tp2)*costheta+5*t1)*thetad
+    t4 = (-8*theta+(15-tp2)*sintheta-7*t2)*thetad
+    
+    c1 = np.divide(t3, 2*tp3, out=lim0, where=nonzeroidx)
+    c2 = np.divide(t4, 2*tp4, out=lim0, where=nonzeroidx)
+    c3 = np.divide(t3, 2*tp5, out=lim0, where=nonzeroidx)
+    c4 = np.divide(t4, 2*tp6, out=lim0, where=nonzeroidx)
+    ddexpPsidt = c1[...,None]*adjPsi + b1[...,None]*adjPsid +\
+          c2[...,None]*adjPsip2 + b2[...,None]*adjPsid2 +\
+          c3[...,None]*adjPsip3 + b3[...,None]*adjPsid3 +\
+          c4[...,None]*adjPsip4 + b4[...,None]*adjPsid4
         
-    return g, Tg
+    return g, dexpPsi, ddexpPsidt
 
 def Ad(g):
     # Adjoint map of SE(3)
     # g: ... x 4 x 4 SE(3) matrix
     R = g[...,0:3,0:3]
     p_hat = hat(g[...,0:3,3])
-    return np.concatenate((np.concatenate((R, p_hat@R),axis=-1),
-                   np.concatenate((np.zeros_like(R), R),axis=-1)), axis=-2)
+    Adg = np.zeros((*(g.shape[:-2]),6,6))
+    Adg[...,0:3,0:3] = R
+    Adg[...,3:6,3:6] = R
+    Adg[...,0:3,3:6] = p_hat@R
+    return Adg
 
 def Adinv(g):
     # inverse Adjoint map of SE(3), Adinv() = Ad(ginv())
     # g: ... x 4 x 4 SE(3) matrix
     RT = np.swapaxes(g[...,0:3,0:3], -1,-2)
     p_hat = hat(g[...,0:3,3])
-    return np.concatenate((np.concatenate((RT, -RT@p_hat),axis=-1),
-                   np.concatenate((np.zeros_like(RT), RT),axis=-1)), axis=-2)
+    Adinvg = np.zeros((*(g.shape[:-2]),6,6))
+    Adinvg[...,0:3,0:3] = RT
+    Adinvg[...,3:6,3:6] = RT
+    Adinvg[...,0:3,3:6] = -RT@p_hat
+    return Adinvg
 
 def ad(xi):
     # Adjoint map of se(3)
     # xi: ... x 6 se(3) twist
     v_hat = hat(xi[...,0:3])
     u_hat = hat(xi[...,3:6])
-    return np.concatenate((np.concatenate((u_hat, v_hat),axis=-1),
-                   np.concatenate((np.zeros_like(u_hat), u_hat),axis=-1)), axis=-2)
+    ad_xi = np.zeros((*xi.shape,6))
+    ad_xi[...,0:3,0:3] = u_hat
+    ad_xi[...,0:3,3:6] = v_hat
+    ad_xi[...,3:6,3:6] = u_hat
+    return ad_xi
+
+def coad(xi):
+    # co-adjoint map of se(3)
+    # xi: ... x 6 se(3) twist
+    v_hat = hat(xi[...,0:3])
+    u_hat = hat(xi[...,3:6])
+    coad_xi = np.zeros((*xi.shape,6))
+    coad_xi[...,0:3,0:3] = u_hat
+    coad_xi[...,3:6,0:3] = v_hat
+    coad_xi[...,3:6,3:6] = u_hat
+    return coad_xi
 
 def main():
     # print(np.__version__)
+
     # psi = np.tile(np.array([1.0,0.5,9.0,0.1,0.2,0.3]),(1000,1))
-    psi = np.tile(np.array([1.0,0.5,9.0,0.0,0.0,0.0]),(20,1))
+    psi = np.tile(np.array([1.0,0.5,9.0,0.0,0.0,0.0]),(36,1))
     t0 = time.time()
     T = expSE3(psi)
     t1 = time.time()
-    Tt, TT = expTSE3(psi)
+    Tt, _, _ = expTdSE3(psi,psi)
     t2 = time.time()
     print(t1-t0)
     print(t2-t1)
     # print(T)
     # print(Tt)
+
+    # xi = np.random.rand(6)
+    # t0 = time.time()
+    # ad_xi = ad(xi)
+    # t1 = time.time()
+    # adt_xi = ad_test(xi)
+    # t2 = time.time()
+    # print(t1-t0)
+    # print(t2-t1)
+    # print(np.max(np.absolute(ad_xi-adt_xi)))
+
+    # xi = np.random.rand(1000,6)
+    # t0 = time.time()
+    # h = Hat(xi)
+    # t1 = time.time()
+    # ht = Hat_test(xi)
+    # t2 = time.time()
+    # print(t1-t0)
+    # print(t2-t1)
+    # print(np.max(np.absolute(h-ht)))
 
 if __name__ == "__main__":
     main()

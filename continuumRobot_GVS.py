@@ -10,35 +10,47 @@ import matplotlib.animation as animation
 from SE3 import *
 
 class continuumRobot_GVS:
-    def __init__(self, MP, deg=3, p=3, nb=12):
+    def __init__(self, MP, deg=3, p=3, nb=12, model="Cosserat"):
         # space integration parameters
         # self.N = 41
         self.L = MP["L"]
         # self.s_step = np.linspace(0,self.L,self.N)
         # self.ds = self.s_step[1] - self.s_step[0]
-        xq, self.wq = np.polynomial.legendre.leggauss(deg) # Legendre zeros and quadrature weights
+        xq, wq = np.polynomial.legendre.leggauss(deg) # Legendre zeros and quadrature weights
         self.xq = (xq + 1)/2
+        
         xz, _ = np.polynomial.legendre.leggauss(2) # 4th-order Zanna quadrature (4.17)
         self.xz = (xz + 1)/2
 
         self.nb = nb # number of basis/control points
         self.sk = np.linspace(0, 1, p+nb+1-2*p) # joints of polynomial pieces, uniformly distributed
         knots = np.concatenate((np.zeros(p), self.sk, np.ones(p))) # knot points for B-spline
+        self.wq = np.tile(wq,len(self.sk)-1)
         # self.sk = np.unique(knots) # joints of polynomial pieces
         self.hk = self.sk[1:] - self.sk[:-1] # quadrature intervals
         self.sq = (self.sk[:-1,None] + self.hk[:,None]*self.xq[None,:]).flatten() # quadrature points between knots
-        self.sg = np.sort(np.concatenate([self.sk,self.sq])) # locations of all sig points
+        # self.sg = np.sort(np.concatenate([self.sk,self.sq])) # locations of all sig points
+        self.sg = np.concatenate((np.array([0]),self.sq,np.array([1]))) # locations of all sig points
         self.hg = self.sg[1:] - self.sg[:-1] # Magnus expansion intervals
         self.sz1 = self.sg[:-1] + self.hg*self.xz[0] # Zanna quadrature points between sig points
         self.sz2 = self.sg[:-1] + self.hg*self.xz[1] # Zanna quadrature points between sig points
         self.p = p # degree of B-spline
         # self.nb = len(knots) - p - 1 # number of B-spline basis
-        self.ng = len(self.sg)
+        self.ng = len(self.sg) # if sig points are only quadrature points, then need to add s=0 and s=L
         self.N = 0
-        self.dof = 6*self.nb
+        
+        # B_Cosserat = np.eye(6)
+        # B_Kirchhoff = np.vstack((np.eye(3),np.zeros(3)))
+        if model == "Cosserat":
+            self.B = np.eye(6)
+        elif model == "Kirchhoff":
+            self.B = np.vstack((np.eye(3),np.zeros(3)))
+        na = np.shape(self.B)[1]
+        self.dof = na*self.nb
         # self.col = sites # collocation sites
 
         # collocation basis
+        
         nz = self.ng-1
         Bk = np.zeros((len(self.sk),self.nb))
         Bq = np.zeros((len(self.sq),self.nb))
@@ -65,7 +77,7 @@ class continuumRobot_GVS:
             self.Bq[:,i,i*self.nb:(i+1)*self.nb] = Bq
             self.Bz1[:,i,i*self.nb:(i+1)*self.nb] = Bz1
             self.Bz2[:,i,i*self.nb:(i+1)*self.nb] = Bz2
-        
+        self.BqT = np.swapaxes(self.Bq,-1,-2)
 
         # time integration parameters
         self.BDF(0,5e-3)
@@ -88,17 +100,19 @@ class continuumRobot_GVS:
         EA  = MP["E"]*A
 
         self.I   = np.diag([I1,I2,I3])
-        self.K = np.diag([GA, GA, EA, EI, EI, GI3])
+        self.Ks = np.diag([GA, GA, EA, EI, EI, GI3])
         self.Kbt = np.diag([EI, EI, GI3])
         self.Kse = np.diag([GA, GA, EA])
-        self.Bbt = MP["Bbt"]
-        self.Bse = MP["Bse"]
-        self.Kbt_c0Bbt = self.Kbt + self.c0*MP["Bbt"]
-        self.Kse_c0Bse = self.Kse + self.c0*MP["Bse"]
+        self.Dbt = MP["Dbt"]
+        self.Dse = MP["Dse"]
+        self.Ds = np.concatenate((np.concatenate((self.Dse,np.zeros_like(self.Dse)),axis=-1),
+                                 np.concatenate((np.zeros_like(self.Dbt),self.Dbt),axis=-1)), axis=-2)
+        self.Kbt_c0Dbt = self.Kbt + self.c0*MP["Dbt"]
+        self.Kse_c0Dse = self.Kse + self.c0*MP["Dse"]
         self.invKbt = np.linalg.inv(self.Kbt)
         self.invKse = np.linalg.inv(self.Kse)
-        self.inv_Kbt_c0Bbt = np.linalg.inv(self.Kbt + self.c0*MP["Bbt"])
-        self.inv_Kse_c0Bse = np.linalg.inv(self.Kse + self.c0*MP["Bse"])
+        self.inv_Kbt_c0Dbt = np.linalg.inv(self.Kbt + self.c0*MP["Dbt"])
+        self.inv_Kse_c0Dse = np.linalg.inv(self.Kse + self.c0*MP["Dse"])
         self.usr = MP["usr"]
         self.vsr = MP["vsr"]
         self.xisr = np.concatenate([self.vsr,self.usr])
@@ -113,6 +127,12 @@ class continuumRobot_GVS:
 
         self.rt = MP["rt"]
         self.rt_hat = hat(self.rt)
+        self.rt = self.rt.T
+
+        # Generalized stiffness matrix
+        self.K = np.sum(self.wq[:,None,None]*np.swapaxes(self.Bq,-1,-2)@self.Ks[None,...]@self.Bq, axis=0)
+        # Generalized damping matrix
+        self.D = np.sum(self.wq[:,None,None]*np.swapaxes(self.Bq,-1,-2)@self.Ds[None,...]@self.Bq, axis=0)
         
         # controllables
         self.tau = np.zeros_like(self.rt)
@@ -128,15 +148,16 @@ class continuumRobot_GVS:
         self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
         self.Zh = np.zeros((self.N,18))
         self.q = np.zeros(self.dof)
-        self.qdot = None
+        self.qdot = np.zeros_like(self.q)
         self.g = np.tile(np.eye(4),(self.ng,1,1))
         self.J = np.zeros((self.ng,6,self.dof))
-        self.Jdot = None
+        self.Jdot = np.zeros_like(self.J)
         self.M = None
         self.C = None
 
-    def set_q(self,q):
+    def set_state(self,q,qdot):
         self.q = q
+        self.qdot = qdot
     
     def BDF(self,alpha,dt):
         self.dt = dt
@@ -146,100 +167,66 @@ class continuumRobot_GVS:
         self.d1 = alpha/(1 + alpha)
     
     def forward_kinematics(self):
+        hg = self.hg[:,None]
+
         xi_z1 = self.Bz1@self.q + self.xisr # body twist at all Zanna quadrature points
-        xi_z2 = self.Bz2@self.q + self.xisr # note that this expression only works for q shape (dof,)
+        xi_z2 = self.Bz2@self.q + self.xisr # this expression only works for q shape (dof,)
         ad_xi_z1 = ad(xi_z1)
-        Omega = self.hg[:,None]/2*(xi_z1+xi_z2) + \
-            np.sqrt(3)*self.hg[:,None]**2/12*np.squeeze((ad_xi_z1@xi_z2[...,None]),axis=-1) # 4th-order Zanna collocation (4.19)
-        DOmegaDq  = self.hg[:,None,None]/2*(self.Bz1+self.Bz2) + \
-                    (np.sqrt(3)*self.hg[:,None,None]**2)/12*(ad_xi_z1@self.Bz2-ad(xi_z2)@self.Bz1)
-        expOmega, TexpOmega = expTSE3(Omega)
+
+        Z2 = np.sqrt(3)*hg**2/12
+        Omega = hg/2*(xi_z1+xi_z2) + \
+            Z2*np.squeeze((ad_xi_z1@xi_z2[...,None]),axis=-1) # 4th-order Zanna collocation (4.19)
+        DOmegaDq  = hg[...,None]/2*(self.Bz1+self.Bz2) + \
+                    Z2[...,None]*(ad_xi_z1@self.Bz2-ad(xi_z2)@self.Bz1)
+
+        D2OmegaDq2 = 2*Z2[...,None]*(ad(self.Bz1@self.qdot)@self.Bz2)
+
+        expOmega, dexpOmega, ddexpOmegadt = expTdSE3(Omega, DOmegaDq@self.qdot)
+
         AdinvexpOmega = Adinv(expOmega)
-        J_rel = TexpOmega@DOmegaDq
+        J_rel = dexpOmega@DOmegaDq
         for i in range(self.ng-1):
             self.g[i+1,:,:] = self.g[i,:,:]@expOmega[i,:,:]
             self.J[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.J[i,:,:] + J_rel[i,:,:])
-
-    # def Cosserat_dynamic_ODE(self):
-    #     # Generalized mass matrix
-    #     self.M = np.sum(self.wq*self.J@self.Ms@self.J)
-
-    #     # Generalized centrifugal & Coriolis matrix
-    #     # self.C = self.wq*self.J'@(self.Ms@self.Jd+ad(eta)'@self.Ms*self.J)
-
-    #     # Generalized actuation
-    #     pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
-    #     pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
-    #     pbs_n = pbs / pbs_norm[:,None]
-    #     pbs_hat = hat(pbs_n) # nt x 3 x 3
-    #     A_i = -pbs_hat @ pbs_hat * (self.tau[:,None,None] / (pbs_norm[:,None,None])) # nt x 3 x 3
-    #     G_i = -A_i @ rt_hat # nt x 3 x 3
-    #     a_i = np.squeeze(A_i @ np.cross(u,pbs)[...,None],axis=-1) # nt x 3
         
-    #     a = np.sum(a_i,axis=0)
-    #     b = np.sum(np.cross(rt,a_i),axis=0)
-    #     A = np.sum(A_i,axis=0)
-    #     G = np.sum(G_i,axis=0)
-    #     H = np.sum(rt_hat@G_i,axis=0)
-
-    #     # Generalized external load
-    #     fc = np.zeros(3) #fc[j] 
-    #     f  = self.rhoAg + fc
-    
-
-    #     rt = self.rt
-    #     rt_hat = self.rt_hat
-    #     Bbt = self.Bbt
-    #     Bse = self.Bse
-    #     usr = self.usr
-    #     vsr = self.vsr
-    #     Kbt = self.Kbt
-    #     Kse = self.Kse
-    #     I     = self.I
-    #     c0    = self.c0
-
-    #     h = y[3:7]
-    #     R = Rh(h)
-    #     u = y[7:10]
-    #     v = y[10:13]
-    #     q = y[13:16]
-    #     w = y[16:19]
-        
-    #     uh = zh[0:3]
-    #     vh = zh[3:6]
-    #     qh = zh[6:9]
-    #     wh = zh[9:12]
-    #     ush = zh[12:15]
-    #     vsh = zh[15:18]
+        self.eta = self.J@self.qdot
+        Jdot_rel = ad(self.eta[:-1,...])@J_rel + ddexpOmegadt@DOmegaDq + dexpOmega@D2OmegaDq2
+        for i in range(self.ng-1):
+            self.Jdot[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.Jdot[i,:,:] + Jdot_rel[i,:,:])
 
 
+    def Cosserat_dynamic_ODE(self):
+        # Mqdd + (C+D)qd + Kq = Bu + f
 
-    #     u_hat = hat(u)
-    #     w_hat = hat(w)
+        wq = self.wq[:,None,None]
+        Bq = self.Bq
+        Ms = self.Ms[None,...]
+        # q_idx = np.mod(np.arange(self.ng), 4) != 0
+        J = self.J[1:-1,...]
+        JT = np.swapaxes(J,-1,-2)
+        xiq = Bq@self.q + self.xisr
+        rt = self.rt[None,...] # None x 3 x nt
 
-    #     ut = c0*u + uh
-    #     vt = c0*v + vh
-    #     qt = c0*q + qh
-    #     wt = c0*w + wh
-        
-        
-        
-    #     K = np.vstack((np.hstack((H + self.Kbt_c0Bbt, G.T)),
-    #                     np.hstack((G, A + self.Kse_c0Bse))))
-        
-    #     mb = Kbt@(u - usr) + Bbt@ut
-    #     nb = Kse@(v - vsr) + Bse@vt
-        
-    #     rhs = np.hstack([-b + self.rho*(np.cross(w,I@w) + I@wt) - np.cross(v,nb) - np.cross(u,mb) - Bbt@ush,
-    #                     -a + self.rhoA*(np.cross(w,q)+qt) - R.T@f - np.cross(u,nb) - Bse@vsh]) # + C*q*norm(q) drag
-        
-    #     ps  = R@v
-    #     hs  = 0.5*hat_for_h(u)@h
-    #     us_vs = np.linalg.solve(K,rhs)
-    #     qs  = vt - u_hat@q + w_hat@v
-    #     ws  = ut - u_hat@w
+        # Generalized mass matrix
+        self.M = np.sum(wq*JT@Ms@J, axis=0)
 
-    #     return np.concatenate([ps,hs,us_vs,qs,ws])
+        # Generalized centrifugal & Coriolis matrix
+        self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
+
+        # Generalized actuation
+        pbs = np.cross(xiq[:,3:6,None],rt, axis=1) + xiq[:,0:3,None] # nq x 3 x nt
+        pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # nq x 1 x nt
+        pbs_n = pbs / pbs_norm # nq x 3 x nt
+        Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # nq x 6 x nt
+        self.B = -np.sum(wq*self.BqT@Act, axis=0) # dof x nt
+
+        # Generalized external load
+        fc = np.zeros(3) #fc[j] 
+        f  = self.rhoAg + fc
+        F = np.concatenate((f,np.zeros_like(f)),axis=0)
+        self.f = np.sum(wq*JT@F, axis=0)
+
+        # return np.concatenate([ps,hs,us_vs,qs,ws])
 
     # # Y : [p(0:3), h(3:12), u(12:15), v(15:18)]
     # # orientations integration with rotation matrices (in our numerical applications the rod is straight in rest configuration)
@@ -416,8 +403,8 @@ def main():
         "E": 200e+9, # Young's modulus
         "nu": 0.25, # Poisson's ratio
         "rho": 1100, # density
-        "Bbt": 0*np.eye(3), # damping 5e-7
-        "Bse": 0*np.eye(3), # damping 5e-8
+        "Dbt": 0*np.eye(3), # damping 5e-7
+        "Dse": 0*np.eye(3), # damping 5e-8
         "usr": np.zeros(3), # natural twist
         "vsr": np.array([0,0,1]), # natural twist
         "g": np.zeros(3), # gravitational acceleration
@@ -430,14 +417,14 @@ def main():
     TDCR = continuumRobot_GVS(MP)
 
     q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    TDCR.set_q(q)
+    TDCR.set_state(q,q)
     t0 = time.time()
     TDCR.forward_kinematics()
+    TDCR.Cosserat_dynamic_ODE()
     t1 = time.time()
     print(t1-t0)
     p = TDCR.g[:,0:3,3]
-    print(TDCR.ng)
-    eta = TDCR.J@q
+    v = np.squeeze(TDCR.g[...,0:3,0:3]@TDCR.eta[...,0:3,None],axis=-1)
 
     # num_steps = 40
     # # tendon release
@@ -450,7 +437,7 @@ def main():
     ax = fig.add_subplot(projection='3d')
     # line = ax.plot(traj[1,:,0],traj[1,:,1],traj[1,:,2])
     line = ax.plot(p[:,0],p[:,1],p[:,2])
-    ax.quiver(p[:,0],p[:,1],p[:,2], eta[:,0],eta[:,1],eta[:,2], normalize=False)
+    ax.quiver(p[:,0],p[:,1],p[:,2], v[:,0],v[:,1],v[:,2], normalize=False)
     ax.axis('equal')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
