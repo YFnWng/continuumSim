@@ -2,7 +2,9 @@ import numpy as np
 # from casadi import *
 from scipy.interpolate import BSpline
 # from scipy.spatial.transform import Rotation
-from scipy.optimize import root
+# from scipy.linalg import solve
+# from scipy.optimize import root
+from scipy.integrate import solve_ivp
 import time
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -44,13 +46,12 @@ class continuumRobot_GVS:
         if model == "Cosserat":
             self.B = np.eye(6)
         elif model == "Kirchhoff":
-            self.B = np.vstack((np.eye(3),np.zeros(3)))
+            self.B = np.vstack((np.zeros((3,3)),np.eye(3)))
         na = np.shape(self.B)[1]
         self.dof = na*self.nb
         # self.col = sites # collocation sites
 
         # collocation basis
-        
         nz = self.ng-1
         Bk = np.zeros((len(self.sk),self.nb))
         Bq = np.zeros((len(self.sq),self.nb))
@@ -68,15 +69,19 @@ class continuumRobot_GVS:
             active_sz2 = (self.sz2>=knots[i]) & (self.sz2<=knots[i+p+1])
             Bz2[active_sz2,i] = b(self.sz2[active_sz2])
         Bk[-1,-1] = 1
-        self.Bk = np.zeros((len(self.sk),6,self.dof))
-        self.Bq = np.zeros((len(self.sq),6,self.dof))
-        self.Bz1 = np.zeros((nz,6,self.dof))
-        self.Bz2 = np.zeros((nz,6,self.dof))
-        for i in range(6):
+        self.Bk = np.zeros((len(self.sk),na,self.dof))
+        self.Bq = np.zeros((len(self.sq),na,self.dof))
+        self.Bz1 = np.zeros((nz,na,self.dof))
+        self.Bz2 = np.zeros((nz,na,self.dof))
+        for i in range(na):
             self.Bk[:,i,i*self.nb:(i+1)*self.nb] = Bk
             self.Bq[:,i,i*self.nb:(i+1)*self.nb] = Bq
             self.Bz1[:,i,i*self.nb:(i+1)*self.nb] = Bz1
             self.Bz2[:,i,i*self.nb:(i+1)*self.nb] = Bz2
+        self.Bk = self.B[None,...]@self.Bk
+        self.Bq = self.B[None,...]@self.Bq
+        self.Bz1 = self.B[None,...]@self.Bz1
+        self.Bz2 = self.B[None,...]@self.Bz2
         self.BqT = np.swapaxes(self.Bq,-1,-2)
 
         # time integration parameters
@@ -130,12 +135,12 @@ class continuumRobot_GVS:
         self.rt = self.rt.T
 
         # Generalized stiffness matrix
-        self.K = np.sum(self.wq[:,None,None]*np.swapaxes(self.Bq,-1,-2)@self.Ks[None,...]@self.Bq, axis=0)
+        self.K = np.sum(self.wq[:,None,None]*self.BqT@self.Ks[None,...]@self.Bq, axis=0)
         # Generalized damping matrix
-        self.D = np.sum(self.wq[:,None,None]*np.swapaxes(self.Bq,-1,-2)@self.Ds[None,...]@self.Bq, axis=0)
+        self.D = np.sum(self.wq[:,None,None]*self.BqT@self.Ds[None,...]@self.Bq, axis=0)
         
         # controllables
-        self.tau = np.zeros_like(self.rt)
+        self.tau = np.zeros_like(self.rt[0])
         self.R0 = np.eye(3)
         self.p0 = np.zeros(3)
 
@@ -144,16 +149,19 @@ class continuumRobot_GVS:
         self.ML = np.zeros(3)
 
         # cache
-        self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
-        self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
-        self.Zh = np.zeros((self.N,18))
+        # self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
+        # self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
+        # self.Zh = np.zeros((self.N,18))
         self.q = np.zeros(self.dof)
         self.qdot = np.zeros_like(self.q)
+        self.qddot = np.zeros_like(self.q)
         self.g = np.tile(np.eye(4),(self.ng,1,1))
         self.J = np.zeros((self.ng,6,self.dof))
         self.Jdot = np.zeros_like(self.J)
-        self.M = None
-        self.C = None
+        self.M = np.zeros((self.dof,self.dof))
+        self.C = np.zeros((self.dof,self.dof))
+        self.A = np.zeros((self.dof,self.rt.shape[1]))
+        self.f = np.zeros(self.dof)
 
     def set_state(self,q,qdot):
         self.q = q
@@ -165,12 +173,20 @@ class continuumRobot_GVS:
         self.c1 = -2/self.dt
         self.c2 = (0.5 + alpha)/(self.dt*(1 + alpha))
         self.d1 = alpha/(1 + alpha)
+
+    def Newmark(self, dt=5e-3, beta=1/4, gamma=1/2):
+        a = beta*dt**2
+        b = gamma*dt
+        fn = self.q + dt*self.qdot + dt**2*(1/2-beta)*self.qddot
+        hn = self.qdot + dt*(1-gamma)*self.qddot
+        self.q = a*self.qddot + fn
+        self.qdot = b*self.qddot + hn
     
-    def forward_kinematics(self):
+    def forward_kinematics(self, q, qdot):
         hg = self.hg[:,None]
 
-        xi_z1 = self.Bz1@self.q + self.xisr # body twist at all Zanna quadrature points
-        xi_z2 = self.Bz2@self.q + self.xisr # this expression only works for q shape (dof,)
+        xi_z1 = self.Bz1@q + self.xisr # body twist at all Zanna quadrature points
+        xi_z2 = self.Bz2@q + self.xisr # this expression only works for q shape (dof,)
         ad_xi_z1 = ad(xi_z1)
 
         Z2 = np.sqrt(3)*hg**2/12
@@ -179,9 +195,9 @@ class continuumRobot_GVS:
         DOmegaDq  = hg[...,None]/2*(self.Bz1+self.Bz2) + \
                     Z2[...,None]*(ad_xi_z1@self.Bz2-ad(xi_z2)@self.Bz1)
 
-        D2OmegaDq2 = 2*Z2[...,None]*(ad(self.Bz1@self.qdot)@self.Bz2)
+        D2OmegaDq2 = 2*Z2[...,None]*(ad(self.Bz1@qdot)@self.Bz2)
 
-        expOmega, dexpOmega, ddexpOmegadt = expTdSE3(Omega, DOmegaDq@self.qdot)
+        expOmega, dexpOmega, ddexpOmegadt = expTdSE3(Omega, DOmegaDq@qdot)
 
         AdinvexpOmega = Adinv(expOmega)
         J_rel = dexpOmega@DOmegaDq
@@ -189,23 +205,31 @@ class continuumRobot_GVS:
             self.g[i+1,:,:] = self.g[i,:,:]@expOmega[i,:,:]
             self.J[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.J[i,:,:] + J_rel[i,:,:])
         
-        self.eta = self.J@self.qdot
+        self.eta = self.J@qdot
         Jdot_rel = ad(self.eta[:-1,...])@J_rel + ddexpOmegadt@DOmegaDq + dexpOmega@D2OmegaDq2
         for i in range(self.ng-1):
             self.Jdot[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.Jdot[i,:,:] + Jdot_rel[i,:,:])
 
 
-    def Cosserat_dynamic_ODE(self):
-        # Mqdd + (C+D)qd + Kq = Bu + f
+    def Cosserat_dynamic_ODE(self, t, y):
+        # Mqdd + (C+D)qd + Kq = Au + f
+        q = y[0:self.dof]
+        qdot = y[self.dof:]
+        tau = self.tau(t)
 
+        # forward kinematics
+        self.forward_kinematics(q,qdot)
+        
+        # cache
         wq = self.wq[:,None,None]
         Bq = self.Bq
         Ms = self.Ms[None,...]
         # q_idx = np.mod(np.arange(self.ng), 4) != 0
         J = self.J[1:-1,...]
         JT = np.swapaxes(J,-1,-2)
-        xiq = Bq@self.q + self.xisr
-        rt = self.rt[None,...] # None x 3 x nt
+        JLT = self.J[-1,...].T
+        xiq = Bq@q + self.xisr
+        rt = self.rt # 3 x nt
 
         # Generalized mass matrix
         self.M = np.sum(wq*JT@Ms@J, axis=0)
@@ -214,11 +238,19 @@ class continuumRobot_GVS:
         self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
 
         # Generalized actuation
-        pbs = np.cross(xiq[:,3:6,None],rt, axis=1) + xiq[:,0:3,None] # nq x 3 x nt
+        pbs = np.cross(xiq[:,3:6,None],rt[None,...], axis=1) + xiq[:,0:3,None] # nq x 3 x nt
         pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # nq x 1 x nt
         pbs_n = pbs / pbs_norm # nq x 3 x nt
-        Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # nq x 6 x nt
-        self.B = -np.sum(wq*self.BqT@Act, axis=0) # dof x nt
+        Act = np.concatenate((pbs_n, np.cross(rt[None,...],pbs_n, axis=1)), axis=1) # nq x 6 x nt
+
+        # boundary condition of actuation
+        xiL = self.Bk[-1,...]@q + self.xisr
+        pbsL = np.cross(xiL[3:6,None],rt, axis=0) + xiL[0:3,None] # 3 x nt
+        pbsL_norm = np.linalg.norm(pbsL, ord=2, axis=0, keepdims=True) # 1 x nt
+        pbsL_n = pbsL / pbsL_norm # 3 x nt
+        ActL = np.concatenate((pbsL_n, np.cross(rt,pbsL_n, axis=0)), axis=0) # 6 x nt
+
+        self.A = -np.sum(wq*self.BqT@Act, axis=0) - JLT@ActL # dof x nt
 
         # Generalized external load
         fc = np.zeros(3) #fc[j] 
@@ -226,53 +258,54 @@ class continuumRobot_GVS:
         F = np.concatenate((f,np.zeros_like(f)),axis=0)
         self.f = np.sum(wq*JT@F, axis=0)
 
-        # return np.concatenate([ps,hs,us_vs,qs,ws])
+        # self.qddot = solve(self.M, self.A@self.tau + self.f - (self.C+self.D)@self.qdot - self.K@self.q, assume_a="positive definite")
+        self.qddot = np.linalg.solve(self.M, self.A@tau + self.f - (self.C+self.D)@self.qdot - self.K@self.q)
 
-    # # Y : [p(0:3), h(3:12), u(12:15), v(15:18)]
-    # # orientations integration with rotation matrices (in our numerical applications the rod is straight in rest configuration)
-    # def Cosserat_static_ODE(self, s, y):
-    #     del s
-    #     f = self.rhoAg
-    #     usr = self.usr
-    #     vsr = self.vsr
-    #     Kbt = self.Kbt
-    #     Kse = self.Kse
-    #     rt = self.rt
-    #     rt_hat = self.rt_hat
+        return np.concatenate([self.qdot,self.qddot])
 
-    #     h = y[3:7]
-    #     R = Rh(h)
-    #     u = y[7:10]
-    #     v = y[10:13]
-        
-    #     pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
-    #     pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
-    #     pbs_n = pbs / pbs_norm[:,None]
-    #     # print(pbs_norm)
-    #     pbs_hat = hat(pbs_n) # nt x 3 x 3
-    #     A_i = -pbs_hat @ pbs_hat * (self.tau[:,None,None] / (pbs_norm[:,None,None])) # nt x 3 x 3
-    #     G_i = -A_i @ rt_hat # nt x 3 x 3
-    #     a_i = np.squeeze(A_i @ np.cross(u,pbs)[...,None],axis=-1) # nt x 3
-        
-    #     a = np.sum(a_i,axis=0)
-    #     b = np.sum(np.cross(rt,a_i),axis=0)
-    #     A = np.sum(A_i,axis=0)
-    #     G = np.sum(G_i,axis=0)
-    #     H = np.sum(rt_hat@G_i,axis=0)
-        
-    #     K = np.vstack((np.hstack((H + Kbt, G.T)),
-    #                     np.hstack((G, A + Kse))))
+    def Cosserat_static_error(self):
+        # Kq = Au + f
 
-    #     mb = Kbt@(u - usr)
-    #     nb = Kse@(v - vsr)
+        # forward kinematics
+        self.forward_kinematics() # less calc
         
-    #     rhs = -np.hstack((np.cross(u,mb) + np.cross(v,nb) + b,
-    #                     np.cross(u,nb) + a + R.T@f))
+        # cache
+        wq = self.wq[:,None,None]
+        Bq = self.Bq
+        # q_idx = np.mod(np.arange(self.ng), 4) != 0
+        J = self.J[1:-1,...]
+        JT = np.swapaxes(J,-1,-2)
+        JLT = self.J[-1,...].T
+        xiq = Bq@self.q + self.xisr
+        rt = self.rt # 3 x nt
 
-    #     ps  = R@v
-    #     hs  = 0.5*hat_for_h(u)@h # + 0.1*(1-h@h.T)*h
-    #     us_vs = np.linalg.solve(K,rhs)
-    #     return np.concatenate([ps,hs,us_vs])
+        # Generalized actuation
+        pbs = np.cross(xiq[:,3:6,None],rt[None,...], axis=1) + xiq[:,0:3,None] # nq x 3 x nt
+        pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # nq x 1 x nt
+        pbs_n = pbs / pbs_norm # nq x 3 x nt
+        Act = np.concatenate((pbs_n, np.cross(rt[None,...],pbs_n, axis=1)), axis=1) # nq x 6 x nt
+
+        # boundary condition of actuation
+        xiL = self.Bk[-1,...]@self.q + self.xisr
+        pbsL = np.cross(xiL[3:6,None],rt, axis=0) + xiL[0:3,None] # 3 x nt
+        pbsL_norm = np.linalg.norm(pbsL, ord=2, axis=0, keepdims=True) # 1 x nt
+        pbsL_n = pbsL / pbsL_norm # 3 x nt
+        ActL = np.concatenate((pbsL_n, np.cross(rt,pbsL_n, axis=0)), axis=0) # 6 x nt
+
+        self.A = -np.sum(wq*self.BqT@Act, axis=0) - JLT@ActL # dof x nt
+
+        # Generalized external load
+        fc = np.zeros(3) #fc[j] 
+        f  = self.rhoAg + fc
+        F = np.concatenate((f,np.zeros_like(f)),axis=0)
+        self.f = np.sum(wq*JT@F, axis=0)
+
+        return self.K@self.q - (self.A@self.tau + self.f)
+    
+    def roll_out(self, tau):
+        self.tau = tau
+        solve_ivp()
+
     
     # def Cosserat_static_shooting(self, twist0):
     #     # Y = np.zeros((self.N,19))
@@ -414,12 +447,15 @@ def main():
                     [0,-delta,0]])
     }
     
-    TDCR = continuumRobot_GVS(MP)
+    TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
 
-    q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    TDCR.set_state(q,q)
+    # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    # q = np.zeros((TDCR.nb*3))
+    q = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    TDCR.set_state(q,qdot)
     t0 = time.time()
-    TDCR.forward_kinematics()
+    #TDCR.forward_kinematics()
     TDCR.Cosserat_dynamic_ODE()
     t1 = time.time()
     print(t1-t0)
