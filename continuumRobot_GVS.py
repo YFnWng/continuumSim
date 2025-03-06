@@ -216,6 +216,7 @@ class continuumRobot_GVS:
         q = y[0:self.dof]
         qdot = y[self.dof:]
         tau = self.tau(t)
+        # tau = np.zeros(4)
 
         # forward kinematics
         self.forward_kinematics(q,qdot)
@@ -263,11 +264,11 @@ class continuumRobot_GVS:
 
         return np.concatenate([self.qdot,self.qddot])
 
-    def Cosserat_static_error(self):
+    def Cosserat_static_error(self, q):
         # Kq = Au + f
 
         # forward kinematics
-        self.forward_kinematics() # less calc
+        self.forward_kinematics(q, np.zeros_like(q)) # less calc
         
         # cache
         wq = self.wq[:,None,None]
@@ -276,7 +277,7 @@ class continuumRobot_GVS:
         J = self.J[1:-1,...]
         JT = np.swapaxes(J,-1,-2)
         JLT = self.J[-1,...].T
-        xiq = Bq@self.q + self.xisr
+        xiq = Bq@q + self.xisr
         rt = self.rt # 3 x nt
 
         # Generalized actuation
@@ -286,7 +287,7 @@ class continuumRobot_GVS:
         Act = np.concatenate((pbs_n, np.cross(rt[None,...],pbs_n, axis=1)), axis=1) # nq x 6 x nt
 
         # boundary condition of actuation
-        xiL = self.Bk[-1,...]@self.q + self.xisr
+        xiL = self.Bk[-1,...]@q + self.xisr
         pbsL = np.cross(xiL[3:6,None],rt, axis=0) + xiL[0:3,None] # 3 x nt
         pbsL_norm = np.linalg.norm(pbsL, ord=2, axis=0, keepdims=True) # 1 x nt
         pbsL_n = pbsL / pbsL_norm # 3 x nt
@@ -300,11 +301,14 @@ class continuumRobot_GVS:
         F = np.concatenate((f,np.zeros_like(f)),axis=0)
         self.f = np.sum(wq*JT@F, axis=0)
 
-        return self.K@self.q - (self.A@self.tau + self.f)
+        return self.K@q - (self.A@self.tau + self.f)
     
-    def roll_out(self, tau):
+    def roll_out(self, tau, t_span):
         self.tau = tau
-        solve_ivp()
+        y0 = np.concatenate((self.q,self.qdot))
+        rollout = solve_ivp(self.Cosserat_dynamic_ODE, t_span, y0, method="BDF")
+        print(rollout.message)
+        return rollout.t, rollout.y
 
     
     # def Cosserat_static_shooting(self, twist0):
@@ -449,14 +453,23 @@ def main():
     
     TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
 
+    def tau(t):
+        if t < 0:
+            return np.array([20,0,0,0])
+        else:
+            return np.zeros(4)
+
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     # q = np.zeros((TDCR.nb*3))
     q = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    # qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    qdot = np.zeros(TDCR.nb*3)
+    
     TDCR.set_state(q,qdot)
     t0 = time.time()
     #TDCR.forward_kinematics()
-    TDCR.Cosserat_dynamic_ODE()
+    TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
+    # t, y = TDCR.roll_out(tau,np.array([0,0.05]))
     t1 = time.time()
     print(t1-t0)
     p = TDCR.g[:,0:3,3]
