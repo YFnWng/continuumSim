@@ -176,6 +176,34 @@ def coad(xi):
     coad_xi[...,3:6,3:6] = u_hat
     return coad_xi
 
+def hat_for_h(u):
+    u1, u2, u3 = u
+    return np.array([
+            [0, -u1, -u2, -u3],
+            [u1, 0, u3, -u2],
+            [u2, -u3, 0, u1],
+            [u3, u2, -u1, 0]
+            ])
+
+def Rh(h):
+    h1, h2, h3, h4 = h
+    h_squared = np.dot(h, h)
+    I = np.eye(3)
+    h2_2 = h2**2
+    h3_2 = h3**2
+    h4_2 = h4**2
+    h2h3 = h2*h3
+    h4h1 = h4*h1
+    h2h4 = h2*h4
+    h3h1 = h3*h1
+    h3h4 = h3*h4
+    h2h1 = h2*h1
+    return I + 2 / h_squared * np.array([
+        [-h3_2 - h4_2, h2h3 - h4h1, h2h4 + h3h1],
+        [h2h3 + h4h1, -h2_2 - h4_2, h3h4 - h2h1],
+        [h2h4 - h3h1, h3h4 + h2h1, -h2_2 - h3_2]
+    ])
+
 def main():
     # print(np.__version__)
 

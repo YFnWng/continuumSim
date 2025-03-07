@@ -4,7 +4,8 @@ from scipy.optimize import root
 import time
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from Utils.Math import *
+# from Utils.Math import *
+from SE3 import *
 
 class continuumRobot:
     def __init__(self, MP):
@@ -63,7 +64,8 @@ class continuumRobot:
 
         # external loads
         self.FL = np.zeros(3)
-        self.ML = np.zeros(3)
+        # self.ML = np.zeros(3)
+        self.ML = np.array([0,0.3,0])
 
         # cache
         self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
@@ -116,6 +118,7 @@ class continuumRobot:
         vt = c0*v + vh
         qt = c0*q + qh
         wt = c0*w + wh
+        print(qt)
         
         pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
         pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
@@ -149,7 +152,7 @@ class continuumRobot:
 
         return np.concatenate([ps,hs,us_vs,qs,ws])
 
-    # Y : [p(0:3), h(3:12), u(12:15), v(15:18)]
+    # Y : [p(0:3), h(3:7), u(7:10), v(10:13)]
     # orientations integration with rotation matrices (in our numerical applications the rod is straight in rest configuration)
     def Cosserat_static_ODE(self, s, y):
         del s
@@ -187,7 +190,8 @@ class continuumRobot:
         mb = Kbt@(u - usr)
         nb = Kse@(v - vsr)
         
-        rhs = -np.hstack((np.cross(u,mb) + np.cross(v,nb) + b,
+        # m = np.array([0,0.3,0])
+        rhs = -np.hstack((np.cross(u,mb) + np.cross(v,nb) + b, # + R.T@m
                         np.cross(u,nb) + a + R.T@f))
 
         ps  = R@v
@@ -286,9 +290,10 @@ class continuumRobot:
         for i in range(num_steps):
             t0 = t1
             self.Zh = self.c1*self.Z + self.c2*Z_prev
+            # print(self.Zh)
             Z_prev = self.Z
             self.tau = input[i+1]
-            print(ig)
+            # print(ig)
             sol = root(self.Cosserat_dynamic_shooting,ig,method='lm')
             ig = sol.x
             t1 = time.time()
@@ -337,21 +342,28 @@ def main():
     
     TDCR = continuumRobot(MP)
 
-    num_steps = 40
+    num_steps = 0
     # tendon release
     input = np.zeros((num_steps+1,4))
-    input[0,0] = 20
+    # input[0,0] = 20
 
     traj = TDCR.Cosserat_dynamic_sim(0.002, num_steps, 0, input, np.array([0,0,0,0,0,1]))
 
-    # fig = plt.figure()
-    # ax = fig.add_subplot(projection='3d')
-    # line = ax.plot(traj[1,:,0],traj[1,:,1],traj[1,:,2])
-    # ax.axis('equal')
-    # ax.set_xlabel('x')
-    # ax.set_ylabel('y')
-    # ax.set_zlabel('z')
-    # # plt.show()
+    print(TDCR.Y[:,8])
+    # print(TDCR.Zh[:,7])
+
+    # fig,ax = plt.subplots()
+    # ax.plot(TDCR.Zh[:,7])
+    # plt.show()
+
+    fig = plt.figure() 
+    ax = fig.add_subplot(projection='3d')
+    line = ax.plot(traj[0,:,0],traj[0,:,1],traj[0,:,2])
+    ax.axis('equal')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('z')
+    plt.show()
 
     # def update(frame):
     #     # update the line plot:
@@ -365,9 +377,9 @@ def main():
     # plt.show()
 
     # print(traj[:,-1,0])
-    fig,ax = plt.subplots()
-    ax.plot(np.linspace(0,num_steps,num_steps+1),traj[:,-1,0])
-    plt.show()
+    # fig,ax = plt.subplots()
+    # ax.plot(np.linspace(0,num_steps,num_steps+1),traj[:,-1,0])
+    # plt.show()
 
 
 if __name__ == "__main__":
