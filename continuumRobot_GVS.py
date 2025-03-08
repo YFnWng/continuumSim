@@ -28,7 +28,7 @@ class continuumRobot_GVS:
         self.nb = nb # number of basis/control points
         self.sk = np.linspace(0, 1, p+nb+1-2*p) # joints of polynomial pieces, uniformly distributed
         knots = np.concatenate((np.zeros(p), self.sk, np.ones(p))) # knot points for B-spline
-        self.wq = np.tile(wq,len(self.sk)-1)
+        self.wq = np.tile(wq,len(self.sk)-1)/(2*(len(self.sk)-1)) # all weights should sum to 1 !!!!
         # self.sk = np.unique(knots) # joints of polynomial pieces
         self.hk = self.sk[1:] - self.sk[:-1] # quadrature intervals
         self.sq = (self.sk[:-1,None] + self.hk[:,None]*self.xq[None,:]).flatten() # quadrature points between knots
@@ -53,6 +53,7 @@ class continuumRobot_GVS:
 
         # collocation basis
         nz = self.ng-1
+        Bg = np.zeros((self.ng,self.nb))
         Bk = np.zeros((len(self.sk),self.nb))
         Bq = np.zeros((len(self.sq),self.nb))
         Bz1 = np.zeros((nz,self.nb))
@@ -60,6 +61,8 @@ class continuumRobot_GVS:
         # self.D = np.zeros_like(self.S,device=device)
         for i in range(self.nb):
             b = BSpline.basis_element(knots[i:i+p+2])
+            active_sg = (self.sg>=knots[i]) & (self.sg<=knots[i+p+1])
+            Bg[active_sg,i] = b(self.sg[active_sg])
             active_sk = (self.sk>=knots[i]) & (self.sk<=knots[i+p+1])
             Bk[active_sk,i] = b(self.sk[active_sk])
             active_sq = (self.sq>=knots[i]) & (self.sq<=knots[i+p+1])
@@ -69,20 +72,25 @@ class continuumRobot_GVS:
             active_sz2 = (self.sz2>=knots[i]) & (self.sz2<=knots[i+p+1])
             Bz2[active_sz2,i] = b(self.sz2[active_sz2])
         Bk[-1,-1] = 1
+        Bg[-1,-1] = 1
+        self.Bg = np.zeros((self.ng,na,self.dof))
         self.Bk = np.zeros((len(self.sk),na,self.dof))
         self.Bq = np.zeros((len(self.sq),na,self.dof))
         self.Bz1 = np.zeros((nz,na,self.dof))
         self.Bz2 = np.zeros((nz,na,self.dof))
         for i in range(na):
+            self.Bg[:,i,i*self.nb:(i+1)*self.nb] = Bg
             self.Bk[:,i,i*self.nb:(i+1)*self.nb] = Bk
             self.Bq[:,i,i*self.nb:(i+1)*self.nb] = Bq
             self.Bz1[:,i,i*self.nb:(i+1)*self.nb] = Bz1
             self.Bz2[:,i,i*self.nb:(i+1)*self.nb] = Bz2
+        self.Bg = self.B[None,...]@self.Bg
         self.Bk = self.B[None,...]@self.Bk
         self.Bq = self.B[None,...]@self.Bq
         self.Bz1 = self.B[None,...]@self.Bz1
         self.Bz2 = self.B[None,...]@self.Bz2
         self.BqT = np.swapaxes(self.Bq,-1,-2)
+        self.BgT = np.swapaxes(self.Bg,-1,-2)
 
         self.hg = self.hg*self.L
         self.sg = self.sg*self.L
@@ -155,8 +163,8 @@ class continuumRobot_GVS:
 
         # external loads
         self.FL = np.zeros(3)
-        # self.ML = np.zeros(3)
-        self.ML = np.array([0,0.3,0])
+        self.ML = np.zeros(3)
+        # self.ML = np.array([0,0.3,0])
         self.WL = np.concatenate((self.FL,self.ML))
 
         # cache
@@ -169,6 +177,7 @@ class continuumRobot_GVS:
         self.g = np.tile(np.eye(4),(self.ng,1,1))
         self.J = np.zeros((self.ng,6,self.dof))
         self.Jdot = np.zeros_like(self.J)
+        self.eta = np.zeros((self.ng,6))
         self.M = np.zeros((self.dof,self.dof))
         self.C = np.zeros((self.dof,self.dof))
         self.A = np.zeros((self.dof,self.rt.shape[1]))
@@ -234,7 +243,7 @@ class continuumRobot_GVS:
         self.forward_kinematics(q,qdot)
         
         # cache
-        wq = self.wq[:,None,None]
+        wq = self.L*self.wq[:,None,None]
         Bq = self.Bq
         Ms = self.Ms[None,...]
         # q_idx = np.mod(np.arange(self.ng), 4) != 0
@@ -243,15 +252,9 @@ class continuumRobot_GVS:
         # JLT = self.J[-1,...].T
         xiq = Bq@q + self.xisr
         rt = self.rt[None,...] # None x 3 x nt
-        print(J[-1,:,self.nb:self.nb*2])
-        plt.spy(J[-1,...])
-        plt.show() 
 
         # Generalized mass matrix
         self.M = np.sum(wq*JT@Ms@J, axis=0)
-        print(self.M[self.nb:2*self.nb,self.nb:2*self.nb])
-        # plt.spy(self.M)
-        # plt.show() 
 
         # Generalized centrifugal & Coriolis matrix
         self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
@@ -278,8 +281,11 @@ class continuumRobot_GVS:
         self.f = np.sum(wq*JT@F, axis=0)
 
         # self.qddot = solve(self.M, self.A@self.tau + self.f - (self.C+self.D)@self.qdot - self.K@self.q, assume_a="positive definite")
-        qddot = np.linalg.solve(self.M, self.A@tau + self.f - (self.C+self.D)@qdot - self.K@q)
-        print(self.K@q)
+        qddot = np.linalg.solve(self.M, self.A@tau + self.f - (self.C+self.L*self.D)@qdot - self.L*self.K@q)
+        # print(tau)
+        # print(qdot)
+        # print(self.f)
+        # print(self.M)
 
         return np.concatenate([qdot,qddot])
 
@@ -290,7 +296,7 @@ class continuumRobot_GVS:
         self.forward_kinematics(q, np.zeros_like(q)) # less calc
         
         # cache
-        wq = self.wq[:,None,None]
+        wq = self.L*self.wq[:,None,None]
         Bq = self.Bq
         # q_idx = np.mod(np.arange(self.ng), 4) != 0
         # J = self.J[1:-1,...]
@@ -314,7 +320,7 @@ class continuumRobot_GVS:
         # WL = np.concatenate((self.g[-1,0:3,0:3].T@self.FL,self.g[-1,0:3,0:3].T@self .ML))
         self.f = np.squeeze(np.sum(wq*JT@F[...,None], axis=0),axis=-1) + JLT@self.WL
 
-        return self.K@q - (self.A@self.tau + self.f)
+        return self.L*self.K@q - (self.A@self.tau + self.f)
     
     def static_solve(self, tau, ig):
         self.tau = tau
@@ -335,6 +341,42 @@ class continuumRobot_GVS:
         print("nfev = ",rollout.nfev)
         print("njev = ",rollout.njev)
         return rollout.t, rollout.y
+    
+    def strong_form_dynamics(self, q, qdot):
+        # for debugging only
+        # Lambda^prime = Ms*eta^dot - coad(eta)*Ms*eta + coad(xi)*Lambda - Fext
+        # Lambda = Ks*epsilon + Ds*xi^dot + Act*tau
+        tau = np.zeros(4)
+
+        # cache
+        Bg = self.Bg
+        Ms = self.Ms[None,...]
+        Ks = self.Ks[None,...]
+        Ds = self.Ds[None,...]
+        # q_idx = np.mod(np.arange(self.ng), 4) != 0
+        J = self.J
+        JT = np.swapaxes(J,-1,-2)
+        # JLT = self.J[-1,...].T
+        epsilon = Bg@q
+        xi = epsilon + self.xisr
+        xidot = Bg@qdot
+        rt = self.rt[None,...] # None x 3 x nt
+
+        # forward kinematics
+        self.forward_kinematics(q, qdot) # less calc
+
+        # actuation
+        pbs = np.cross(xi[:,3:6,None],rt, axis=1) + xi[:,0:3,None] # ng x 3 x nt
+        pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # ng x 1 x nt
+        pbs_n = pbs / pbs_norm # ng x 3 x nt
+        Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # ng x 6 x nt
+
+        Lambda = Ks@epsilon[...,None] + Ds@xidot[...,None]# + Act@tau
+        print(coad(xi)@Lambda)
+
+        etadot = np.linalg.solve(Ms, coad(self.eta)@Ms@self.eta[...,None] - coad(xi)@Lambda)
+
+        return np.squeeze(etadot, axis=-1)
     
     # def Cosserat_dynamic_sim(self, dt, num_steps, alpha, input, ig):
     #     self.BDF(alpha,dt)
@@ -416,21 +458,24 @@ def main():
 
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     # q = np.zeros((TDCR.nb*3))
-    q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*1.91,np.zeros(TDCR.nb)])
+    kappa = 1.90985932
+    q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
     # qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     qdot = np.zeros(TDCR.nb*3)
     
     TDCR.set_state(q,qdot)
-    # TDCR.tau = tau
+    TDCR.tau = tau
     # TDCR.tau = np.array([20,0,0,0])
     # TDCR.tau = np.zeros(4)
     t0 = time.time()
     # TDCR.forward_kinematics(q,q)
-    # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
+    dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
     # t, y = TDCR.roll_out(tau,np.array([0,0.5]))
-    x = TDCR.static_solve(np.array([0,0,0,0]), qdot)
+    # x = TDCR.static_solve(np.array([40,0,0,0]), q)
+    # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
     # err = TDCR.Cosserat_static_error(q)
+    etadots = TDCR.strong_form_dynamics(q,qdot)
     t1 = time.time()
     print(t1-t0)
     # print(is_pd(TDCR.M))
@@ -438,15 +483,21 @@ def main():
 
     # print(TDCR.M)
     # print(dy[TDCR.dof:])
-    # eta_t = TDCR.J@dy[TDCR.dof:]
-    # print(eta_t)
-    print(x)
+    eta_t = TDCR.J@dy[TDCR.dof:]
+    print(etadots[:,0])
+    print(eta_t[:,0])
+    # print(x)
+    # print(err)
     # print(TDCR.Bq[:,4,:])
     # xq = TDCR.Bq@dy[TDCR.dof:]
     # fig,ax = plt.subplots()
     # ax.plot(TDCR.sq,xq[:,4])
     # plt.show()
     # print(err)
+
+    fig,ax = plt.subplots()
+    ax.plot(TDCR.sg,etadots[:,0])
+    ax.plot(TDCR.sg,eta_t[:,0])
 
 
     # print(t)
@@ -455,9 +506,18 @@ def main():
     #     TDCR.forward_kinematics(y[:TDCR.dof,i],y[TDCR.dof:,i])
     #     x_traj[i] = TDCR.g[-1,1,3]
 
+    # theta = TDCR.L*kappa
+    # pr = np.array([1-np.cos(theta),np.sin(theta)])/kappa
+    # vr = (-pr/kappa + TDCR.L/kappa*np.array([np.sin(theta),np.cos(theta)]))*kappa
+    # print(pr)
+    # print(vr)
+
     p = TDCR.g[:,0:3,3]
     v = np.squeeze(TDCR.g[...,0:3,0:3]@TDCR.eta[...,0:3,None],axis=-1)
-    # print(v)
+    # print(p[-1,:])
+    # print(v[-1,:])
+    # print(TDCR.eta[-1,:])
+    # print(TDCR.L*kappa)
 
     # num_steps = 40
     # # tendon release

@@ -71,7 +71,8 @@ def expTdSE3(Psi, Psid):
     w = Psi[...,3:6] # N x 3
     wd = Psid[...,3:6] # N x 3
     theta = np.linalg.norm(w, ord=2, axis=-1, keepdims=True) # N x 1
-    nonzeroidx = theta != 0 # theta >= 1e-2
+    # nonzeroidx = theta != 0 # theta >= 1e-2
+    nonzeroidx = theta >= 1e-2 # theta >= 1e-2
     lim0 = np.zeros_like(theta)
     # thetad = np.divide(np.inner(wd,w), theta, out=np.linalg.norm(wd, ord=2, axis=-1, keepdims=True), where=nonzeroidx)
     thetad = np.divide(np.sum(wd*w, axis=-1, keepdims=True), theta, out=lim0, where=nonzeroidx)
