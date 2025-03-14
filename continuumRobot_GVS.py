@@ -372,11 +372,76 @@ class continuumRobot_GVS:
         Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # ng x 6 x nt
 
         Lambda = Ks@epsilon[...,None] + Ds@xidot[...,None]# + Act@tau
-        print(coad(xi)@Lambda)
+        print(coad(xi)[0,...])
+        # print(coad(xi)@Lambda)
 
-        etadot = np.linalg.solve(Ms, coad(self.eta)@Ms@self.eta[...,None] - coad(xi)@Lambda)
+        etadot = np.linalg.solve(Ms, -coad(self.eta)@Ms@self.eta[...,None] + coad(xi)@Lambda)
 
         return np.squeeze(etadot, axis=-1)
+    
+    # orientations integration with quaternion
+    # Y: [p(0:3), h(3:7), u(7:10), v(10:13), q(13:16), w(16:19)], h being the quaternion
+    def strong_form_dynamic_ODE(self, s, y):
+        rt = self.rt
+        rt_hat = self.rt_hat
+        Bbt = self.Bbt
+        Bse = self.Bse
+        usr = self.usr
+        vsr = self.vsr
+        Kbt = self.Kbt
+        Kse = self.Kse
+        J     = self.J
+        c0    = self.c0
+
+        h = y[3:7]
+        R = Rh(h)
+        eta = y[7:13]
+        etadot = y[13:19]
+        Lambda = y[19:25]
+
+        fc = np.zeros(3) #fc[j] 
+        f  = self.rhoAg + fc
+
+        u_hat = hat(u)
+        w_hat = hat(w)
+
+        ut = c0*u + uh
+        vt = c0*v + vh
+        qt = c0*q + qh
+        wt = c0*w + wh
+        print(qt)
+        
+        pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
+        pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
+        pbs_n = pbs / pbs_norm[:,None]
+        # print(pbs_norm)
+        pbs_hat = hat(pbs_n) # nt x 3 x 3
+        A_i = -pbs_hat @ pbs_hat * (self.tau[:,None,None] / (pbs_norm[:,None,None])) # nt x 3 x 3
+        G_i = -A_i @ rt_hat # nt x 3 x 3
+        a_i = np.squeeze(A_i @ np.cross(u,pbs)[...,None],axis=-1) # nt x 3
+        
+        a = np.sum(a_i,axis=0)
+        b = np.sum(np.cross(rt,a_i),axis=0)
+        A = np.sum(A_i,axis=0)
+        G = np.sum(G_i,axis=0)
+        H = np.sum(rt_hat@G_i,axis=0)
+        
+        K = np.vstack((np.hstack((H + self.Kbt_c0Bbt, G.T)),
+                        np.hstack((G, A + self.Kse_c0Bse))))
+        
+        mb = Kbt@(u - usr) + Bbt@ut
+        nb = Kse@(v - vsr) + Bse@vt
+        
+        rhs = np.hstack([-b + self.rho*(np.cross(w,J@w) + J@wt) - np.cross(v,nb) - np.cross(u,mb) - Bbt@ush,
+                        -a + self.rhoA*(np.cross(w,q)+qt) - R.T@f - np.cross(u,nb) - Bse@vsh]) # + C*q*norm(q) drag
+        
+        ps  = R@v
+        hs  = 0.5*hat_for_h(u)@h
+        us_vs = np.linalg.solve(K,rhs)
+        qs  = vt - u_hat@q + w_hat@v
+        ws  = ut - u_hat@w
+
+        return np.concatenate([ps,hs,us_vs,qs,ws])
     
     # def Cosserat_dynamic_sim(self, dt, num_steps, alpha, input, ig):
     #     self.BDF(alpha,dt)
@@ -430,11 +495,11 @@ class continuumRobot_GVS:
 
 
 def main():
-    delta = 0.015 # tendon offset
+    delta = 0.015 # tendon offset 0.015
     MP = {
-        "L": 0.2, # length
-        "r": 0.001, # rod radius
-        "E": 200e+9, # Young's modulus
+        "L": 0.2, # length 0.2
+        "r": 0.001, # rod radius 1
+        "E": 200e+9, # Young's modulus 200
         "nu": 0.25, # Poisson's ratio
         "rho": 1100, # density
         "Dbt": 0*np.eye(3), # damping 5e-7
@@ -472,7 +537,7 @@ def main():
     dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
     # t, y = TDCR.roll_out(tau,np.array([0,0.5]))
-    # x = TDCR.static_solve(np.array([40,0,0,0]), q)
+    # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
     # err = TDCR.Cosserat_static_error(q)
     etadots = TDCR.strong_form_dynamics(q,qdot)
@@ -495,9 +560,9 @@ def main():
     # plt.show()
     # print(err)
 
-    fig,ax = plt.subplots()
-    ax.plot(TDCR.sg,etadots[:,0])
-    ax.plot(TDCR.sg,eta_t[:,0])
+    # fig,ax = plt.subplots()
+    # ax.plot(TDCR.sg,etadots[:,0])
+    # ax.plot(TDCR.sg,eta_t[:,0])
 
 
     # print(t)
