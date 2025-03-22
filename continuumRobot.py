@@ -64,13 +64,14 @@ class continuumRobot:
 
         # external loads
         self.FL = np.zeros(3)
-        # self.ML = np.zeros(3)
-        self.ML = np.array([0,0.3,0])
+        self.ML = np.zeros(3)
+        # self.ML = np.array([0,0.3,0])
 
         # cache
         self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
         self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
         self.Zh = np.zeros((self.N,18))
+        self.qt = np.zeros((self.N,3))
     
     def BDF(self,alpha,dt):
         self.dt = dt
@@ -81,7 +82,7 @@ class continuumRobot:
         
     # orientations integration with quaternion
     # Y: [p(0:3), h(3:7), u(7:10), v(10:13), q(13:16), w(16:19)], h being the quaternion
-    def Cosserat_dynamic_ODE(self, s, y, zh):
+    def Cosserat_dynamic_ODE(self, s, y, zh, j):
         del s
         rt = self.rt
         rt_hat = self.rt_hat
@@ -118,7 +119,8 @@ class continuumRobot:
         vt = c0*v + vh
         qt = c0*q + qh
         wt = c0*w + wh
-        print(qt)
+        # print(qt)
+        self.qt[j] = qt
         
         pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
         pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
@@ -236,7 +238,7 @@ class continuumRobot:
         # Y = euler_ivp(self.Cosserat_dynamic_ODE, (0,self.L), y0, self.N)
         ds = self.ds
         for j in range(self.N-1):
-            ys = self.Cosserat_dynamic_ODE(self.s_step[j],self.Y[j],self.Zh[j])
+            ys = self.Cosserat_dynamic_ODE(self.s_step[j],self.Y[j],self.Zh[j],j)
             self.Y[j+1] = self.Y[j] + ds*ys
             self.Z[j] = np.concatenate([self.Y[j,7:19],ys[7:13]])
         # self.Y = Y
@@ -273,6 +275,7 @@ class continuumRobot:
         self.BDF(alpha,dt)
         trajectory = np.zeros((num_steps+1,*np.shape(self.Y)))
         self.tau = input[0]
+        # self.ML = np.array([0,0.3,0])
 
         t0 = time.time()
         sol = root(self.Cosserat_static_shooting,ig,method='lm')
@@ -293,7 +296,9 @@ class continuumRobot:
             # print(self.Zh)
             Z_prev = self.Z
             self.tau = input[i+1]
-            # print(ig)
+            # print(self.tau)
+            # self.ML = np.zeros(3)
+            self.FL = np.array([20,0,0])
             sol = root(self.Cosserat_dynamic_shooting,ig,method='lm')
             ig = sol.x
             t1 = time.time()
@@ -341,8 +346,10 @@ def main():
     }
     
     TDCR = continuumRobot(MP)
+    print(TDCR.rhoA)
+    print(TDCR.rho*TDCR.J)
 
-    num_steps = 0
+    num_steps = 1
     # tendon release
     input = np.zeros((num_steps+1,4))
     # input[0,0] = 20
@@ -351,6 +358,8 @@ def main():
 
     print(TDCR.Y[:,8])
     # print(TDCR.Zh[:,7])
+    print(TDCR.qt)
+    print(TDCR.Y[:,13:16])
 
     # fig,ax = plt.subplots()
     # ax.plot(TDCR.Zh[:,7])
@@ -358,7 +367,7 @@ def main():
 
     fig = plt.figure() 
     ax = fig.add_subplot(projection='3d')
-    line = ax.plot(traj[0,:,0],traj[0,:,1],traj[0,:,2])
+    line = ax.plot(traj[1,:,0],traj[1,:,1],traj[1,:,2])
     ax.axis('equal')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
@@ -377,9 +386,11 @@ def main():
     # plt.show()
 
     # print(traj[:,-1,0])
-    # fig,ax = plt.subplots()
+    fig,ax = plt.subplots()
     # ax.plot(np.linspace(0,num_steps,num_steps+1),traj[:,-1,0])
-    # plt.show()
+    ax.plot(TDCR.qt[:,0])
+    ax.plot(TDCR.qt[:,2])
+    plt.show()
 
 
 if __name__ == "__main__":

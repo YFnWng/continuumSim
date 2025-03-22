@@ -162,7 +162,8 @@ class continuumRobot_GVS:
         self.p0 = np.zeros(3)
 
         # external loads
-        self.FL = np.zeros(3)
+        # self.FL = np.zeros(3)
+        self.FL = np.array([20,0,0])
         self.ML = np.zeros(3)
         # self.ML = np.array([0,0.3,0])
         self.WL = np.concatenate((self.FL,self.ML))
@@ -182,6 +183,16 @@ class continuumRobot_GVS:
         self.C = np.zeros((self.dof,self.dof))
         self.A = np.zeros((self.dof,self.rt.shape[1]))
         self.f = np.zeros(self.dof)
+
+        # debugging
+        self.N = 41
+        self.xi = np.zeros((self.N,6))
+        self.xi[:,2] = np.ones(self.N)
+        self.xidot = np.zeros_like(self.xi)
+        self.xiddot = np.zeros_like(self.xidot)
+        self.s_step = np.linspace(0,self.L,self.N)
+        self.ds = self.s_step[1] - self.s_step[0]
+        self.Y = np.zeros((self.N,25))
 
     def set_state(self,q,qdot):
         self.q = q
@@ -249,12 +260,21 @@ class continuumRobot_GVS:
         # q_idx = np.mod(np.arange(self.ng), 4) != 0
         J = self.J[1:-1,...]
         JT = np.swapaxes(J,-1,-2)
-        # JLT = self.J[-1,...].T
+        JLT = self.J[-1,...].T
         xiq = Bq@q + self.xisr
         rt = self.rt[None,...] # None x 3 x nt
 
         # Generalized mass matrix
         self.M = np.sum(wq*JT@Ms@J, axis=0)
+        with np.printoptions(threshold=np.inf):
+            print(J[-1,...])
+            fig,ax = plt.subplots()
+            plt.spy(J[-1,...])
+            plt.show()
+            # print(JT[-1,...]@J[-1,...])
+            # fig,ax = plt.subplots()
+            # plt.spy(JT[-1,...]@J[-1,...])
+            # plt.show()
 
         # Generalized centrifugal & Coriolis matrix
         self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
@@ -278,7 +298,7 @@ class continuumRobot_GVS:
         fc = np.zeros(3) #fc[j] 
         f  = self.rhoAg + fc
         F = np.concatenate((f,np.zeros_like(f)),axis=0)
-        self.f = np.sum(wq*JT@F, axis=0)
+        self.f = np.sum(wq*JT@F, axis=0) + JLT@self.WL
 
         # self.qddot = solve(self.M, self.A@self.tau + self.f - (self.C+self.D)@self.qdot - self.K@self.q, assume_a="positive definite")
         qddot = np.linalg.solve(self.M, self.A@tau + self.f - (self.C+self.L*self.D)@qdot - self.L*self.K@q)
@@ -286,6 +306,7 @@ class continuumRobot_GVS:
         # print(qdot)
         # print(self.f)
         # print(self.M)
+        # print(self.A@tau + self.f - (self.C+self.L*self.D)@qdot - self.L*self.K@q)
 
         return np.concatenate([qdot,qddot])
 
@@ -344,7 +365,7 @@ class continuumRobot_GVS:
     
     def strong_form_dynamics(self, q, qdot):
         # for debugging only
-        # Lambda^prime = Ms*eta^dot - coad(eta)*Ms*eta + coad(xi)*Lambda - Fext
+        # Lambda^prime = Ms*eta^dot + coad(eta)*Ms*eta - coad(xi)*Lambda - Fext
         # Lambda = Ks*epsilon + Ds*xi^dot + Act*tau
         tau = np.zeros(4)
 
@@ -381,67 +402,67 @@ class continuumRobot_GVS:
     
     # orientations integration with quaternion
     # Y: [p(0:3), h(3:7), u(7:10), v(10:13), q(13:16), w(16:19)], h being the quaternion
-    def strong_form_dynamic_ODE(self, s, y):
+    def strong_form_dynamic_ODE(self, s, y, xi, xidot, xiddot):
+        # for debugging only
+
+        # cache
+        Ms = self.Ms
+        Ks = self.Ks
+        Ds = self.Ds
+
         rt = self.rt
-        rt_hat = self.rt_hat
-        Bbt = self.Bbt
-        Bse = self.Bse
-        usr = self.usr
-        vsr = self.vsr
-        Kbt = self.Kbt
-        Kse = self.Kse
-        J     = self.J
-        c0    = self.c0
 
         h = y[3:7]
         R = Rh(h)
         eta = y[7:13]
         etadot = y[13:19]
-        Lambda = y[19:25]
+        Lambdai = y[19:25]
 
-        fc = np.zeros(3) #fc[j] 
-        f  = self.rhoAg + fc
+        # forward kinematics
+        ps  = R@xi[0:3]
+        hs  = 0.5*hat_for_h(xi[3:6])@h
+        etas = -ad(xi)@eta + xidot
+        etadots = -ad(xi)@etadot - ad(xidot)@eta + xiddot
 
-        u_hat = hat(u)
-        w_hat = hat(w)
+        # actuation
+        # pbs = np.cross(xi[:,3:6,None],rt, axis=1) + xi[:,0:3,None] # ng x 3 x nt
+        # pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # ng x 1 x nt
+        # pbs_n = pbs / pbs_norm # ng x 3 x nt
+        # Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # ng x 6 x nt
+        
+        Lambda = Ks@(xi-self.xisr) + Ds@xidot# + Act@tau
+        Lambdas = Ms@etadot - ad(eta).T@Ms@eta + ad(xi).T@Lambda# - f
 
-        ut = c0*u + uh
-        vt = c0*v + vh
-        qt = c0*q + qh
-        wt = c0*w + wh
-        print(qt)
-        
-        pbs = np.cross(u[None,:],rt) + v[None,:] # nt x 3
-        pbs_norm = np.linalg.norm(pbs,ord=2,axis=-1) # nt
-        pbs_n = pbs / pbs_norm[:,None]
-        # print(pbs_norm)
-        pbs_hat = hat(pbs_n) # nt x 3 x 3
-        A_i = -pbs_hat @ pbs_hat * (self.tau[:,None,None] / (pbs_norm[:,None,None])) # nt x 3 x 3
-        G_i = -A_i @ rt_hat # nt x 3 x 3
-        a_i = np.squeeze(A_i @ np.cross(u,pbs)[...,None],axis=-1) # nt x 3
-        
-        a = np.sum(a_i,axis=0)
-        b = np.sum(np.cross(rt,a_i),axis=0)
-        A = np.sum(A_i,axis=0)
-        G = np.sum(G_i,axis=0)
-        H = np.sum(rt_hat@G_i,axis=0)
-        
-        K = np.vstack((np.hstack((H + self.Kbt_c0Bbt, G.T)),
-                        np.hstack((G, A + self.Kse_c0Bse))))
-        
-        mb = Kbt@(u - usr) + Bbt@ut
-        nb = Kse@(v - vsr) + Bse@vt
-        
-        rhs = np.hstack([-b + self.rho*(np.cross(w,J@w) + J@wt) - np.cross(v,nb) - np.cross(u,mb) - Bbt@ush,
-                        -a + self.rhoA*(np.cross(w,q)+qt) - R.T@f - np.cross(u,nb) - Bse@vsh]) # + C*q*norm(q) drag
-        
-        ps  = R@v
-        hs  = 0.5*hat_for_h(u)@h
-        us_vs = np.linalg.solve(K,rhs)
-        qs  = vt - u_hat@q + w_hat@v
-        ws  = ut - u_hat@w
+        return np.concatenate([ps,hs,etas,etadots,Lambdas]), Lambda-Lambdai
+    
+    def strong_form_dynamic_shooting(self,uyddot):
+        self.xiddot[:,4] = uyddot
+        h0 = np.array([1,0,0,0])
+        eta0 = np.zeros(3)
+        etadot0 = np.zeros(3)
+        Lambda0 = self.Ks@(self.xi[0]-self.xisr) + self.Ds@self.xidot[0]
+        self.Y[0] = np.concatenate([self.p0,h0,eta0,etadot0,Lambda0])
 
-        return np.concatenate([ps,hs,us_vs,qs,ws])
+        # Y = euler_ivp(self.Cosserat_dynamic_ODE, (0,self.L), y0, self.N)
+        ds = self.ds
+        err = np.zeros((self.N))
+        for j in range(self.N-1):
+            ys,err[j] = self.Cosserat_dynamic_ODE(self.s_step[j],self.Y[j],self.xi[j],self.xidot[j],self.xiddot[j])
+            self.Y[j+1] = self.Y[j] + ds*ys
+
+        hL = self.Y[-1,3:7]
+        RL = Rh(hL)
+        WL = np.concatenate((RL.T@self.FL,RL.T@self.ML))
+        LambdaL = self.Y[-1,19:25]
+
+        return LambdaL - WL
+    
+    def Cosserat_dynamic_BVP(self, ig):
+        t0 = time.time()
+        sol = root(self.strong_form_dynamic_shooting,ig,method='lm')
+        t1 = time.time()
+        return sol.x, t1-t0
+
     
     # def Cosserat_dynamic_sim(self, dt, num_steps, alpha, input, ig):
     #     self.BDF(alpha,dt)
@@ -514,6 +535,9 @@ def main():
     }
     
     TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
+    # print(TDCR.rhoA)
+    # print(TDCR.rho*TDCR.I)
+    # print(TDCR.Ms)
 
     def tau(t):
         if t < 0:
@@ -522,11 +546,11 @@ def main():
             return np.zeros(4)
 
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    # q = np.zeros((TDCR.nb*3))
+    q = np.zeros((TDCR.nb*3))
     kappa = 1.90985932
-    q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
-    # qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    qdot = np.zeros(TDCR.nb*3)
+    # q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
+    qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    # qdot = np.zeros(TDCR.nb*3)
     
     TDCR.set_state(q,qdot)
     TDCR.tau = tau
@@ -534,35 +558,44 @@ def main():
     # TDCR.tau = np.zeros(4)
     t0 = time.time()
     # TDCR.forward_kinematics(q,q)
+    # x = TDCR.static_solve(np.array([0,0,0,0]), q)
     dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
     # t, y = TDCR.roll_out(tau,np.array([0,0.5]))
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
     # err = TDCR.Cosserat_static_error(q)
-    etadots = TDCR.strong_form_dynamics(q,qdot)
+    # etadots = TDCR.strong_form_dynamics(q,qdot)
     t1 = time.time()
     print(t1-t0)
+    print(np.max(TDCR.J))
+    #with np.printoptions(threshold=np.inf):
+    print(TDCR.M.shape)
     # print(is_pd(TDCR.M))
     # print(TDCR.K@x)
+    fig,ax = plt.subplots()
+    plt.spy(TDCR.M)
+    plt.show()
 
     # print(TDCR.M)
+    # print(x-q)
     # print(dy[TDCR.dof:])
     eta_t = TDCR.J@dy[TDCR.dof:]
-    print(etadots[:,0])
-    print(eta_t[:,0])
+    # print(etadots[:,0])
+    # print(eta_t[:,0])
     # print(x)
     # print(err)
     # print(TDCR.Bq[:,4,:])
-    # xq = TDCR.Bq@dy[TDCR.dof:]
-    # fig,ax = plt.subplots()
-    # ax.plot(TDCR.sq,xq[:,4])
-    # plt.show()
+    xq = TDCR.Bq@dy[TDCR.dof:]
+    fig,ax = plt.subplots()
+    ax.plot(TDCR.sq,xq[:,4])
+    plt.show()
     # print(err)
 
-    # fig,ax = plt.subplots()
+    fig,ax = plt.subplots()
     # ax.plot(TDCR.sg,etadots[:,0])
-    # ax.plot(TDCR.sg,eta_t[:,0])
+    ax.plot(TDCR.sg,eta_t[:,0])
+    plt.show()
 
 
     # print(t)
