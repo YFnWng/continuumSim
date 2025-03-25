@@ -99,7 +99,7 @@ class continuumRobot_GVS:
         self.sq = self.sq*self.L
 
         # time integration parameters
-        self.BDF(0,5e-3)
+        # self.BDF(0,5e-3)
 
         # mechanical properties
         self.r = MP["r"]
@@ -126,12 +126,12 @@ class continuumRobot_GVS:
         self.Dse = MP["Dse"]
         self.Ds = np.concatenate((np.concatenate((self.Dse,np.zeros_like(self.Dse)),axis=-1),
                                  np.concatenate((np.zeros_like(self.Dbt),self.Dbt),axis=-1)), axis=-2)
-        self.Kbt_c0Dbt = self.Kbt + self.c0*MP["Dbt"]
-        self.Kse_c0Dse = self.Kse + self.c0*MP["Dse"]
+        # self.Kbt_c0Dbt = self.Kbt + self.c0*MP["Dbt"]
+        # self.Kse_c0Dse = self.Kse + self.c0*MP["Dse"]
         self.invKbt = np.linalg.inv(self.Kbt)
         self.invKse = np.linalg.inv(self.Kse)
-        self.inv_Kbt_c0Dbt = np.linalg.inv(self.Kbt + self.c0*MP["Dbt"])
-        self.inv_Kse_c0Dse = np.linalg.inv(self.Kse + self.c0*MP["Dse"])
+        # self.inv_Kbt_c0Dbt = np.linalg.inv(self.Kbt + self.c0*MP["Dbt"])
+        # self.inv_Kse_c0Dse = np.linalg.inv(self.Kse + self.c0*MP["Dse"])
         self.usr = MP["usr"]
         self.vsr = MP["vsr"]
         self.xisr = np.concatenate([self.vsr,self.usr])
@@ -162,8 +162,8 @@ class continuumRobot_GVS:
         self.p0 = np.zeros(3)
 
         # external loads
-        # self.FL = np.zeros(3)
-        self.FL = np.array([20,0,0])
+        self.FL = np.zeros(3)
+        # self.FL = np.array([20,0,0])
         self.ML = np.zeros(3)
         # self.ML = np.array([0,0.3,0])
         self.WL = np.concatenate((self.FL,self.ML))
@@ -172,9 +172,9 @@ class continuumRobot_GVS:
         # self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
         # self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
         # self.Zh = np.zeros((self.N,18))
-        self.q = np.zeros(self.dof)
-        self.qdot = np.zeros_like(self.q)
-        self.qddot = np.zeros_like(self.q)
+        self.qqq = np.zeros((3,self.dof))
+        # self.qdot = np.zeros_like(self.q)
+        # self.qddot = np.zeros_like(self.q)
         self.g = np.tile(np.eye(4),(self.ng,1,1))
         self.J = np.zeros((self.ng,6,self.dof))
         self.Jdot = np.zeros_like(self.J)
@@ -195,10 +195,10 @@ class continuumRobot_GVS:
         self.Y = np.zeros((self.N,25))
 
     def set_state(self,q,qdot):
-        self.q = q
-        self.qdot = qdot
+        self.qqq[0] = q
+        self.qqq[1] = qdot
     
-    def BDF(self,alpha,dt):
+    def BDF_init(self,alpha,dt):
         # https://en.wikipedia.org/wiki/Backward_differentiation_formula
         self.dt = dt
         self.c0 = (1.5 + alpha)/(self.dt*(1 + alpha))
@@ -206,13 +206,16 @@ class continuumRobot_GVS:
         self.c2 = (0.5 + alpha)/(self.dt*(1 + alpha))
         self.d1 = alpha/(1 + alpha)
 
-    def Newmark(self, dt=5e-3, beta=1/4, gamma=1/2):
-        a = beta*dt**2
-        b = gamma*dt
-        fn = self.q + dt*self.qdot + dt**2*(1/2-beta)*self.qddot
-        hn = self.qdot + dt*(1-gamma)*self.qddot
-        self.q = a*self.qddot + fn
-        self.qdot = b*self.qddot + hn
+    def Newmark_init(self, dt=5e-3, beta=1/4, gamma=1/2):
+        self.dt = dt
+        self.Newmark = np.array([[-gamma/(beta*dt),(1-gamma/beta),(1-gamma/(2*beta))*dt],
+                                 [-1/(beta*dt**2),-1/(beta*dt),1-1/(2*beta)]])
+        self.hqdot = self.Newmark[0]@self.qqq
+        self.hqddot = self.Newmark[1]@self.qqq
+        # fn = self.q + dt*self.qdot + dt**2*(1/2-beta)*self.qddot
+        # hn = self.qdot + dt*(1-gamma)*self.qddot
+        # self.q = a*self.qddot + fn
+        # self.qdot = b*self.qddot + hn
     
     def forward_kinematics(self, q, qdot):
         hg = self.hg[:,None]
@@ -266,15 +269,6 @@ class continuumRobot_GVS:
 
         # Generalized mass matrix
         self.M = np.sum(wq*JT@Ms@J, axis=0)
-        with np.printoptions(threshold=np.inf):
-            print(J[-1,...])
-            fig,ax = plt.subplots()
-            plt.spy(J[-1,...])
-            plt.show()
-            # print(JT[-1,...]@J[-1,...])
-            # fig,ax = plt.subplots()
-            # plt.spy(JT[-1,...]@J[-1,...])
-            # plt.show()
 
         # Generalized centrifugal & Coriolis matrix
         self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
@@ -302,15 +296,58 @@ class continuumRobot_GVS:
 
         # self.qddot = solve(self.M, self.A@self.tau + self.f - (self.C+self.D)@self.qdot - self.K@self.q, assume_a="positive definite")
         qddot = np.linalg.solve(self.M, self.A@tau + self.f - (self.C+self.L*self.D)@qdot - self.L*self.K@q)
-        # print(tau)
-        # print(qdot)
-        # print(self.f)
-        # print(self.M)
-        # print(self.A@tau + self.f - (self.C+self.L*self.D)@qdot - self.L*self.K@q)
 
         return np.concatenate([qdot,qddot])
+    
+    def Cosserat_dynamic_residual(self, t, q, qdot, qddot):
+        # Mqdd + (C+D)qd + Kq = Au + f
 
-    def Cosserat_static_error(self, q):
+        tau = self.tau(t)
+        # tau = np.zeros(4)
+
+        # forward kinematics
+        self.forward_kinematics(q,qdot)
+        
+        # cache
+        wq = self.L*self.wq[:,None,None]
+        Bq = self.Bq
+        Ms = self.Ms[None,...]
+        # q_idx = np.mod(np.arange(self.ng), 4) != 0
+        J = self.J[1:-1,...]
+        JT = np.swapaxes(J,-1,-2)
+        JLT = self.J[-1,...].T
+        xiq = Bq@q + self.xisr
+        rt = self.rt[None,...] # None x 3 x nt
+
+        # Generalized mass matrix
+        self.M = np.sum(wq*JT@Ms@J, axis=0)
+
+        # Generalized centrifugal & Coriolis matrix
+        self.C = np.sum(wq*JT@(Ms@self.Jdot[1:-1,...]+coad(self.eta[1:-1,:])@Ms@J), axis=0)
+
+        # Generalized actuation
+        pbs = np.cross(xiq[:,3:6,None],rt, axis=1) + xiq[:,0:3,None] # nq x 3 x nt
+        pbs_norm = np.linalg.norm(pbs, ord=2, axis=1, keepdims=True) # nq x 1 x nt
+        pbs_n = pbs / pbs_norm # nq x 3 x nt
+        Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # nq x 6 x nt
+
+        self.A = -np.sum(wq*self.BqT@Act, axis=0) # dof x nt
+
+        # Generalized external load
+        fc = np.zeros(3) #fc[j] 
+        f  = self.rhoAg + fc
+        F = np.concatenate((f,np.zeros_like(f)),axis=0)
+        self.f = np.sum(wq*JT@F, axis=0) + JLT@self.WL
+
+        return self.M@qddot + (self.C+self.L*self.D)@qdot + self.L*self.K@q - self.A@tau - self.f
+    
+    def Newmark_residual(self, q, t):
+        qdot = -self.Newmark[0,0]*q + self.hqdot
+        qddot = -self.Newmark[1,0]*q + self.hqddot
+        return self.Cosserat_dynamic_residual(t, q, qdot, qddot)
+
+
+    def Cosserat_static_residual(self, q):
         # Kq = Au + f
 
         # forward kinematics
@@ -345,23 +382,49 @@ class continuumRobot_GVS:
     
     def static_solve(self, tau, ig):
         self.tau = tau
-        sol = root(self.Cosserat_static_error, x0=ig)
+        sol = root(self.Cosserat_static_residual, x0=ig)
         print("success?",sol.success)
         print(sol.status)
         print(sol.message)
         print("nfev: ",sol.nfev)
         # print("njev: ",sol.njev)
         return sol.x
-        
     
-    def roll_out(self, tau, t_span):
+    def roll_out(self, tau, t_span, method="Newmark"):
         self.tau = tau
-        y0 = np.concatenate((self.q,self.qdot))
-        rollout = solve_ivp(self.Cosserat_dynamic_ODE, t_span, y0, method="BDF", t_eval=np.linspace(t_span[0],t_span[1],101))
-        print(rollout.message)
-        print("nfev = ",rollout.nfev)
-        print("njev = ",rollout.njev)
-        return rollout.t, rollout.y
+        # y0 = np.concatenate((self.q,self.qdot))
+        # rollout = solve_ivp(self.Cosserat_dynamic_ODE, t_span, y0, method="Radau", t_eval=np.linspace(t_span[0],t_span[1],101))
+        # print(rollout.message)
+        # print("nfev = ",rollout.nfev)
+        # print("njev = ",rollout.njev)
+        # return rollout.t, rollout.y
+
+        num_step = 100
+        t_eval = np.linspace(t_span[0],t_span[1],num_step+1)
+        q_traj = np.zeros((num_step+1,*np.shape(self.qqq)))
+        p_traj = np.zeros((num_step+1,self.ng,3))
+        q_traj[0] = self.qqq
+        p_traj[0] = self.g[:,0:3,3]
+
+        if method == "Newmark":
+            self.Newmark_init(dt = t_eval[1] - t_eval[0])
+            for i in range(num_step):
+                t0 = time.time()
+                sol = root(lambda q: self.Newmark_residual(q,t_eval[i+1]), x0=q_traj[i,0])
+                t1 = time.time()
+                print("root finding time: ",t1-t0)
+                print(sol.message)
+                qdot = -self.Newmark[0,0]*sol.x + self.hqdot
+                qddot = -self.Newmark[1,0]*sol.x + self.hqddot
+                self.qqq = np.stack((sol.x,qdot,qddot))
+                q_traj[i+1] = self.qqq
+                self.forward_kinematics(sol.x, qdot)
+                p_traj[i+1] = self.g[:,0:3,3]
+                self.hqdot = self.Newmark[0]@self.qqq
+                self.hqddot = self.Newmark[1]@self.qqq
+
+        return t_eval, q_traj, p_traj
+
     
     def strong_form_dynamics(self, q, qdot):
         # for debugging only
@@ -393,7 +456,7 @@ class continuumRobot_GVS:
         Act = np.concatenate((pbs_n, np.cross(rt,pbs_n, axis=1)), axis=1) # ng x 6 x nt
 
         Lambda = Ks@epsilon[...,None] + Ds@xidot[...,None]# + Act@tau
-        print(coad(xi)[0,...])
+        # print(coad(xi)[0,...])
         # print(coad(xi)@Lambda)
 
         etadot = np.linalg.solve(Ms, -coad(self.eta)@Ms@self.eta[...,None] + coad(xi)@Lambda)
@@ -463,56 +526,6 @@ class continuumRobot_GVS:
         t1 = time.time()
         return sol.x, t1-t0
 
-    
-    # def Cosserat_dynamic_sim(self, dt, num_steps, alpha, input, ig):
-    #     self.BDF(alpha,dt)
-    #     trajectory = np.zeros((num_steps+1,*np.shape(self.Y)))
-    #     self.tau = input[0]
-
-    #     t0 = time.time()
-    #     sol = root(self.Cosserat_static_shooting,ig,method='lm')
-    #     ig = sol.x
-    #     t1 = time.time()
-    #     print("---------------------------------------------------")
-    #     print("time step:", -1)
-    #     print("converged:", sol.success)
-    #     print("max abs error:", np.max(np.abs(sol.fun)))
-    #     print("xi (nfev):", sol.nfev)
-    #     print("time used:",t1-t0)
-    #     trajectory[0] = self.Y
-    #     Z_prev = self.Z
-
-    #     for i in range(num_steps):
-    #         t0 = t1
-    #         self.Zh = self.c1*self.Z + self.c2*Z_prev
-    #         Z_prev = self.Z
-    #         self.tau = input[i+1]
-    #         print(ig)
-    #         sol = root(self.Cosserat_dynamic_shooting,ig,method='lm')
-    #         ig = sol.x
-    #         t1 = time.time()
-    #         print("---------------------------------------------------")
-    #         print("time step:", i)
-    #         print("converged:", sol.success)
-    #         print("max abs error:", np.max(np.abs(sol.fun)))
-    #         print("xi (nfev):", sol.nfev)
-    #         print("time used:",t1-t0)
-
-    #         trajectory[i+1] = self.Y
-
-    #     # t0 = t1
-    #     # self.Zh = self.c1*self.Z + self.c2*Z_prev
-    #     # Z_prev = self.Z
-    #     # self.tau = input[0]
-    #     # # print(ig)
-    #     # res = self.Cosserat_dynamic_shooting(ig)
-    #     # # ig = sol.x
-    #     # print(res)
-    #     # t1 = time.time()
-
-    #     # trajectory[0+1] = self.Y
-
-    #     return trajectory
 
 
 def main():
@@ -535,74 +548,67 @@ def main():
     }
     
     TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
-    # print(TDCR.rhoA)
-    # print(TDCR.rho*TDCR.I)
-    # print(TDCR.Ms)
 
     def tau(t):
-        if t < 0:
+        if t <= 0:
             return np.array([20,0,0,0])
         else:
             return np.zeros(4)
 
+    
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    q = np.zeros((TDCR.nb*3))
+    # q = np.zeros((TDCR.nb*3))
     kappa = 1.90985932
-    # q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
-    qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    # qdot = np.zeros(TDCR.nb*3)
+    q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
+    q = TDCR.static_solve(np.array([20,0,0,0]), q)
+    # qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
+    qdot = np.zeros(TDCR.nb*3)
     
     TDCR.set_state(q,qdot)
     TDCR.tau = tau
     # TDCR.tau = np.array([20,0,0,0])
     # TDCR.tau = np.zeros(4)
-    t0 = time.time()
+    # t0 = time.time()
     # TDCR.forward_kinematics(q,q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q)
-    dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
+    # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
-    # t, y = TDCR.roll_out(tau,np.array([0,0.5]))
+    t, q_traj, p_traj = TDCR.roll_out(tau,np.array([0,0.1]))
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
     # err = TDCR.Cosserat_static_error(q)
     # etadots = TDCR.strong_form_dynamics(q,qdot)
-    t1 = time.time()
-    print(t1-t0)
-    print(np.max(TDCR.J))
+    # t1 = time.time()
+    # print(t1-t0)
+
+    # print(np.max(TDCR.J))
     #with np.printoptions(threshold=np.inf):
-    print(TDCR.M.shape)
     # print(is_pd(TDCR.M))
     # print(TDCR.K@x)
-    fig,ax = plt.subplots()
-    plt.spy(TDCR.M)
-    plt.show()
+    # fig,ax = plt.subplots()
+    # plt.spy(TDCR.M)
+    # plt.show()
 
     # print(TDCR.M)
     # print(x-q)
     # print(dy[TDCR.dof:])
-    eta_t = TDCR.J@dy[TDCR.dof:]
+    # eta_t = TDCR.J@dy[TDCR.dof:]
     # print(etadots[:,0])
     # print(eta_t[:,0])
     # print(x)
     # print(err)
     # print(TDCR.Bq[:,4,:])
-    xq = TDCR.Bq@dy[TDCR.dof:]
-    fig,ax = plt.subplots()
-    ax.plot(TDCR.sq,xq[:,4])
-    plt.show()
+    # xq = TDCR.Bq@dy[TDCR.dof:]
+    # fig,ax = plt.subplots()
+    # ax.plot(TDCR.sq,xq[:,4])
+    # plt.show()
     # print(err)
 
-    fig,ax = plt.subplots()
-    # ax.plot(TDCR.sg,etadots[:,0])
-    ax.plot(TDCR.sg,eta_t[:,0])
-    plt.show()
+    # fig,ax = plt.subplots()
+    # # ax.plot(TDCR.sg,etadots[:,0])
+    # ax.plot(TDCR.sg,eta_t[:,0])
+    # plt.show()
 
-
-    # print(t)
-    # x_traj = np.zeros(y.shape[1])
-    # for i in range(y.shape[1]):
-    #     TDCR.forward_kinematics(y[:TDCR.dof,i],y[TDCR.dof:,i])
-    #     x_traj[i] = TDCR.g[-1,1,3]
 
     # theta = TDCR.L*kappa
     # pr = np.array([1-np.cos(theta),np.sin(theta)])/kappa
@@ -610,44 +616,36 @@ def main():
     # print(pr)
     # print(vr)
 
-    p = TDCR.g[:,0:3,3]
-    v = np.squeeze(TDCR.g[...,0:3,0:3]@TDCR.eta[...,0:3,None],axis=-1)
+    # p = TDCR.g[:,0:3,3]
+    # v = np.squeeze(TDCR.g[...,0:3,0:3]@TDCR.eta[...,0:3,None],axis=-1)
     # print(p[-1,:])
     # print(v[-1,:])
     # print(TDCR.eta[-1,:])
     # print(TDCR.L*kappa)
 
-    # num_steps = 40
-    # # tendon release
-    # input = np.zeros((num_steps+1,4))
-    # input[0,0] = 20
-
-    # traj = TDCR.Cosserat_dynamic_sim(0.002, num_steps, 0, input, np.array([0,0,0,0,0,1]))
-
-    # fig,ax = plt.subplots()
-    # ax.plot(t,x_traj)
-    # plt.show()
+    fig,ax = plt.subplots()
+    ax.plot(t,p_traj[:,-1,0])
+    plt.show()
 
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    # line = ax.plot(traj[1,:,0],traj[1,:,1],traj[1,:,2])
-    line = ax.plot(p[:,0],p[:,1],p[:,2])
-    ax.quiver(p[:,0],p[:,1],p[:,2], v[:,0],v[:,1],v[:,2], normalize=False)
+    line = ax.plot(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2])
+    # line = ax.plot(p[:,0],p[:,1],p[:,2])
+    # ax.quiver(p[:,0],p[:,1],p[:,2], v[:,0],v[:,1],v[:,2], normalize=False)
     ax.axis('equal')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_zlabel('z')
     # plt.show()
+    # print(line[0].get_data_3d())
 
-    # def update(frame):
-    #     # update the line plot:
-    #     line[0].set_xdata(traj[frame,:,0])
-    #     line[0].set_ydata(traj[frame,:,1])
-    #     line[0].set_ydata(traj[frame,:,2])
-    #     return line
+    def update(frame):
+        # update the line plot:
+        line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
+        return line
 
 
-    # ani = animation.FuncAnimation(fig=fig, func=update, frames=100, interval=5)
+    ani = animation.FuncAnimation(fig=fig, func=update, frames=100, interval=5)
     plt.show()
 
 if __name__ == "__main__":
