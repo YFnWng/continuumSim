@@ -1,3 +1,5 @@
+# Vectorized SE(3) operations
+# Yifan Wang, Feb 2025
 import numpy as np
 import time
     
@@ -65,7 +67,7 @@ def expSE3(Psi):
     return np.concatenate((np.concatenate((expw, expv),axis=-1), 
                            np.concatenate((np.zeros((*N,1,3),), np.ones((*N,1,1),)),axis=-1)),axis=-2) # N x 4 x 4
 
-def expTdSE3(Psi, Psid):
+def expTdSE3(Psi, Psid, order=1):
     # N = Psi.shape[0:-1]
     # v = Psi[...,0:3] # N x 3
     w = Psi[...,3:6] # N x 3
@@ -73,13 +75,9 @@ def expTdSE3(Psi, Psid):
     theta = np.linalg.norm(w, ord=2, axis=-1, keepdims=True) # N x 1
     # nonzeroidx = theta != 0 # theta >= 1e-2
     nonzeroidx = theta >= 1e-2 # theta >= 1e-2
-    lim0 = np.zeros_like(theta)
-    # thetad = np.divide(np.inner(wd,w), theta, out=np.linalg.norm(wd, ord=2, axis=-1, keepdims=True), where=nonzeroidx)
-    thetad = np.divide(np.sum(wd*w, axis=-1, keepdims=True), theta, out=lim0, where=nonzeroidx)
 
     Psihat  = Hat(Psi)
     adjPsi  = ad(Psi)
-    adjPsid  = ad(Psid)
 
     Psihatp2 = Psihat@Psihat
     Psihatp3 = Psihatp2@Psihat
@@ -88,13 +86,7 @@ def expTdSE3(Psi, Psid):
     adjPsip3 = adjPsip2@adjPsi
     adjPsip4 = adjPsip3@adjPsi
 
-    adjPsid2 = adjPsid@adjPsi + adjPsi@adjPsid
-    adjPsid3 = adjPsid2@adjPsi + adjPsip2@adjPsid
-    adjPsid4 = adjPsid3@adjPsi + adjPsip3@adjPsid
-
     limco = np.ones_like(theta)
-    # I4 = np.tile(np.eye(4),(*N,1,1))
-    # I6 = np.tile(np.eye(6),(*N,1,1))
         
     tp2        = theta*theta
     tp3        = tp2*theta
@@ -118,20 +110,33 @@ def expTdSE3(Psi, Psid):
     dexpPsi = np.eye(6)[None,...] + b1[...,None]*adjPsi + b2[...,None]*adjPsip2 +\
         b3[...,None]*adjPsip3 + b4[...,None]*adjPsip4
     
-    tp6 = tp5*theta
-    t3 = (-8+(8-tp2)*costheta+5*t1)*thetad
-    t4 = (-8*theta+(15-tp2)*sintheta-7*t2)*thetad
     
-    c1 = np.divide(t3, 2*tp3, out=lim0, where=nonzeroidx)
-    c2 = np.divide(t4, 2*tp4, out=lim0, where=nonzeroidx)
-    c3 = np.divide(t3, 2*tp5, out=lim0, where=nonzeroidx)
-    c4 = np.divide(t4, 2*tp6, out=lim0, where=nonzeroidx)
-    ddexpPsidt = c1[...,None]*adjPsi + b1[...,None]*adjPsid +\
-          c2[...,None]*adjPsip2 + b2[...,None]*adjPsid2 +\
-          c3[...,None]*adjPsip3 + b3[...,None]*adjPsid3 +\
-          c4[...,None]*adjPsip4 + b4[...,None]*adjPsid4
+    if order == 1:
+        return g, dexpPsi
+    else:
+        lim0 = np.zeros_like(theta)
+        # thetad = np.divide(np.inner(wd,w), theta, out=np.linalg.norm(wd, ord=2, axis=-1, keepdims=True), where=nonzeroidx)
+        thetad = np.divide(np.sum(wd*w, axis=-1, keepdims=True), theta, out=lim0, where=nonzeroidx)
+
+        adjPsid  = ad(Psid)
+        adjPsid2 = adjPsid@adjPsi + adjPsi@adjPsid
+        adjPsid3 = adjPsid2@adjPsi + adjPsip2@adjPsid
+        adjPsid4 = adjPsid3@adjPsi + adjPsip3@adjPsid
+
+        tp6 = tp5*theta
+        t3 = (-8+(8-tp2)*costheta+5*t1)*thetad
+        t4 = (-8*theta+(15-tp2)*sintheta-7*t2)*thetad
+
+        c1 = np.divide(t3, 2*tp3, out=lim0, where=nonzeroidx)
+        c2 = np.divide(t4, 2*tp4, out=lim0, where=nonzeroidx)
+        c3 = np.divide(t3, 2*tp5, out=lim0, where=nonzeroidx)
+        c4 = np.divide(t4, 2*tp6, out=lim0, where=nonzeroidx)
+        ddexpPsidt = c1[...,None]*adjPsi + b1[...,None]*adjPsid +\
+            c2[...,None]*adjPsip2 + b2[...,None]*adjPsid2 +\
+            c3[...,None]*adjPsip3 + b3[...,None]*adjPsid3 +\
+            c4[...,None]*adjPsip4 + b4[...,None]*adjPsid4
         
-    return g, dexpPsi, ddexpPsidt
+        return g, dexpPsi, ddexpPsidt
 
 def Ad(g):
     # Adjoint map of SE(3)

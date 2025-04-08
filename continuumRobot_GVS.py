@@ -11,6 +11,12 @@ import matplotlib.animation as animation
 # from Utils.Math import *
 from SE3 import *
 # from playground import is_pd
+from contactHandling import *
+
+cylinder_c = [0.05,0,0.97]
+cylinder_r = 0.05
+SDF = lambda p : Ycylinder_SDF(p,center=cylinder_c,radius=cylinder_r)
+contactForce = lambda g, bpt, ds: contact_force(g,bpt,ds,k=5000,alpha=5e-6,mu=0.1,sigma=0.001,SDF=SDF)
 
 class continuumRobot_GVS:
     def __init__(self, MP, deg=4, p=3, nb=12, model="Cosserat"):
@@ -126,12 +132,8 @@ class continuumRobot_GVS:
         self.Dse = MP["Dse"]
         self.Ds = np.concatenate((np.concatenate((self.Dse,np.zeros_like(self.Dse)),axis=-1),
                                  np.concatenate((np.zeros_like(self.Dbt),self.Dbt),axis=-1)), axis=-2)
-        # self.Kbt_c0Dbt = self.Kbt + self.c0*MP["Dbt"]
-        # self.Kse_c0Dse = self.Kse + self.c0*MP["Dse"]
         self.invKbt = np.linalg.inv(self.Kbt)
         self.invKse = np.linalg.inv(self.Kse)
-        # self.inv_Kbt_c0Dbt = np.linalg.inv(self.Kbt + self.c0*MP["Dbt"])
-        # self.inv_Kse_c0Dse = np.linalg.inv(self.Kse + self.c0*MP["Dse"])
         self.usr = MP["usr"]
         self.vsr = MP["vsr"]
         self.xisr = np.concatenate([self.vsr,self.usr])
@@ -139,7 +141,7 @@ class continuumRobot_GVS:
         self.Ksevsr = self.Kse@MP["vsr"]
 
         # g = np.array([0,0,-9.8])
-        g = np.array([0,0,0])
+        g = np.array([9.8,0,0])
         self.rho = MP["rho"]
         self.rhoAg = self.rho*A*g
         self.rhoA  = self.rho*A
@@ -169,9 +171,6 @@ class continuumRobot_GVS:
         self.WL = np.concatenate((self.FL,self.ML))
 
         # cache
-        # self.Y = np.zeros((self.N,19)) # p,h,u,v,q,w
-        # self.Z = np.zeros((self.N,18)) # u,v,q,w,us,vs
-        # self.Zh = np.zeros((self.N,18))
         self.qqq = np.zeros((3,self.dof))
         # self.qdot = np.zeros_like(self.q)
         # self.qddot = np.zeros_like(self.q)
@@ -185,14 +184,14 @@ class continuumRobot_GVS:
         self.f = np.zeros(self.dof)
 
         # debugging
-        self.N = 41
-        self.xi = np.zeros((self.N,6))
-        self.xi[:,2] = np.ones(self.N)
-        self.xidot = np.zeros_like(self.xi)
-        self.xiddot = np.zeros_like(self.xidot)
-        self.s_step = np.linspace(0,self.L,self.N)
-        self.ds = self.s_step[1] - self.s_step[0]
-        self.Y = np.zeros((self.N,25))
+        # self.N = 41
+        # self.xi = np.zeros((self.N,6))
+        # self.xi[:,2] = np.ones(self.N)
+        # self.xidot = np.zeros_like(self.xi)
+        # self.xiddot = np.zeros_like(self.xidot)
+        # self.s_step = np.linspace(0,self.L,self.N)
+        # self.ds = self.s_step[1] - self.s_step[0]
+        # self.Y = np.zeros((self.N,25))
 
     def set_state(self,q,qdot):
         self.qqq[0] = q
@@ -230,9 +229,9 @@ class continuumRobot_GVS:
         DOmegaDq  = hg[...,None]/2*(self.Bz1+self.Bz2) + \
                     Z2[...,None]*(ad_xi_z1@self.Bz2-ad(xi_z2)@self.Bz1)
 
-        D2OmegaDq2 = 2*Z2[...,None]*(ad(self.Bz1@qdot)@self.Bz2)
+        # D2OmegaDq2 = 2*Z2[...,None]*(ad(self.Bz1@qdot)@self.Bz2)
 
-        expOmega, dexpOmega, ddexpOmegadt = expTdSE3(Omega, DOmegaDq@qdot)
+        expOmega, dexpOmega = expTdSE3(Omega, DOmegaDq@qdot) #, ddexpOmegadt
 
         AdinvexpOmega = Adinv(expOmega)
         J_rel = dexpOmega@DOmegaDq
@@ -241,9 +240,9 @@ class continuumRobot_GVS:
             self.J[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.J[i,:,:] + J_rel[i,:,:])
         
         self.eta = self.J@qdot
-        Jdot_rel = ad(self.eta[:-1,...])@J_rel + ddexpOmegadt@DOmegaDq + dexpOmega@D2OmegaDq2
-        for i in range(self.ng-1):
-            self.Jdot[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.Jdot[i,:,:] + Jdot_rel[i,:,:])
+        # Jdot_rel = ad(self.eta[:-1,...])@J_rel + ddexpOmegadt@DOmegaDq + dexpOmega@D2OmegaDq2
+        # for i in range(self.ng-1):
+        #     self.Jdot[i+1,:,:] = AdinvexpOmega[i,:,:]@(self.Jdot[i,:,:] + Jdot_rel[i,:,:])
 
 
     def Cosserat_dynamic_ODE(self, t, y):
@@ -334,10 +333,10 @@ class continuumRobot_GVS:
         self.A = -np.sum(wq*self.BqT@Act, axis=0) # dof x nt
 
         # Generalized external load
-        fc = np.zeros(3) #fc[j] 
-        f  = self.rhoAg + fc
-        F = np.concatenate((f,np.zeros_like(f)),axis=0)
-        self.f = np.sum(wq*JT@F, axis=0) + JLT@self.WL
+        FL,fc = contactForce(self.g[1:,...],self.eta[1:,0:3],self.hg[-1])
+        fc  = self.rhoAg + fc
+        w = np.concatenate((fc,np.zeros_like(fc)),axis=-1)
+        self.f = np.squeeze(np.sum(wq*JT@w[...,None], axis=0), axis=-1) + JLT@np.concatenate((FL,np.zeros(3)))
 
         return self.M@qddot + (self.C+self.L*self.D)@qdot + self.L*self.K@q - self.A@tau - self.f
     
@@ -345,7 +344,6 @@ class continuumRobot_GVS:
         qdot = -self.Newmark[0,0]*q + self.hqdot
         qddot = -self.Newmark[1,0]*q + self.hqddot
         return self.Cosserat_dynamic_residual(t, q, qdot, qddot)
-
 
     def Cosserat_static_residual(self, q):
         # Kq = Au + f
@@ -371,12 +369,12 @@ class continuumRobot_GVS:
         self.A = -np.sum(wq*self.BqT@Act, axis=0)# + JLT@ActL # dof x nt
 
         # Generalized external load
-        fc = np.zeros(3) #fc[j] 
-        f  = self.rhoAg + fc
-        F = np.zeros((JT.shape[0],6))
+        FL,fc = contactForce(self.g[1:,...],np.zeros((self.ng-1,3)),self.hg[-1])
+        fc  = self.rhoAg + fc
+        w = np.concatenate((fc,np.zeros_like(fc)),axis=-1)
         # F = np.concatenate((np.zeros((JT.shape[0],4)),0.3*np.ones((JT.shape[0],1)),np.zeros((JT.shape[0],1))),axis=1)
         # WL = np.concatenate((self.g[-1,0:3,0:3].T@self.FL,self.g[-1,0:3,0:3].T@self .ML))
-        self.f = np.squeeze(np.sum(wq*JT@F[...,None], axis=0),axis=-1) + JLT@self.WL
+        self.f = np.squeeze(np.sum(wq*JT@w[...,None], axis=0),axis=-1) + JLT@np.concatenate((FL,np.zeros(3)))
 
         return self.L*self.K@q - (self.A@self.tau + self.f)
     
@@ -399,12 +397,14 @@ class continuumRobot_GVS:
         # print("njev = ",rollout.njev)
         # return rollout.t, rollout.y
 
-        num_step = 100
+        dt = 5e-3
+        num_step = np.round((t_span[1]-t_span[0])/dt).astype(np.int64)
         t_eval = np.linspace(t_span[0],t_span[1],num_step+1)
         q_traj = np.zeros((num_step+1,*np.shape(self.qqq)))
         p_traj = np.zeros((num_step+1,self.ng,3))
         q_traj[0] = self.qqq
         p_traj[0] = self.g[:,0:3,3]
+        fc_traj = np.zeros((num_step+1,self.ng-1,3))
 
         if method == "Newmark":
             self.Newmark_init(dt = t_eval[1] - t_eval[0])
@@ -423,7 +423,9 @@ class continuumRobot_GVS:
                 self.hqdot = self.Newmark[0]@self.qqq
                 self.hqddot = self.Newmark[1]@self.qqq
 
-        return t_eval, q_traj, p_traj
+                fc_traj[i+1,-1,:],fc_traj[i+1,:-1,:] = contactForce(self.g[1:,...],self.eta[1:,0:3],1)
+
+        return t_eval, q_traj, p_traj, fc_traj
 
     
     def strong_form_dynamics(self, q, qdot):
@@ -526,18 +528,24 @@ class continuumRobot_GVS:
         t1 = time.time()
         return sol.x, t1-t0
 
-
+def data_for_Ycylinder(center_x,center_z,radius,height):
+    y = np.linspace(-height, height, 3)
+    theta = np.linspace(0, 2*np.pi, 18)
+    theta_grid, y_grid=np.meshgrid(theta, y)
+    x_grid = radius*np.cos(theta_grid) + center_x
+    z_grid = radius*np.sin(theta_grid) + center_z
+    return x_grid,y_grid,z_grid
 
 def main():
     delta = 0.015 # tendon offset 0.015
     MP = {
-        "L": 0.2, # length 0.2
-        "r": 0.001, # rod radius 1
-        "E": 200e+9, # Young's modulus 200
-        "nu": 0.25, # Poisson's ratio
-        "rho": 1100, # density
-        "Dbt": 0*np.eye(3), # damping 5e-7
-        "Dse": 0*np.eye(3), # damping 5e-8
+        "L": 1.0, # length 0.2
+        "r": 0.005, # rod radius 0.001
+        "E": 5e+7, # Young's modulus 200e9
+        "nu": 0.5, # Poisson's ratio 0.25
+        "rho": 1100, # density 1100
+        "Dbt": 5e-5*np.eye(3), # damping 5e-7
+        "Dse": 5e-6*np.eye(3), # damping 5e-8
         "usr": np.zeros(3), # natural twist
         "vsr": np.array([0,0,1]), # natural twist
         "g": np.zeros(3), # gravitational acceleration
@@ -550,19 +558,21 @@ def main():
     TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
 
     def tau(t):
-        if t <= 0:
-            return np.array([20,0,0,0])
-        else:
-            return np.zeros(4)
+        # if t <= 0:
+        #     return np.array([20,0,0,0])
+        # else:
+        #     return np.zeros(4)
+        return np.zeros(4)
 
     
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    # q = np.zeros((TDCR.nb*3))
-    kappa = 1.90985932
-    q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
-    q = TDCR.static_solve(np.array([20,0,0,0]), q)
+    q = np.zeros((TDCR.nb*3))
+    # kappa = 1.90985932
+    # q = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
+    # q = TDCR.static_solve(np.array([0,0,0,0]), q)
     # qdot = np.concatenate([np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     qdot = np.zeros(TDCR.nb*3)
+    TDCR.forward_kinematics(q,qdot)
     
     TDCR.set_state(q,qdot)
     TDCR.tau = tau
@@ -573,7 +583,7 @@ def main():
     # x = TDCR.static_solve(np.array([0,0,0,0]), q)
     # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
-    t, q_traj, p_traj = TDCR.roll_out(tau,np.array([0,0.1]))
+    t, q_traj, p_traj, fc_traj = TDCR.roll_out(tau,np.array([0,1.0]))
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
     # err = TDCR.Cosserat_static_error(q)
@@ -627,22 +637,37 @@ def main():
     ax.plot(t,p_traj[:,-1,0])
     plt.show()
 
+    # center=[0.01,0,0.19],radius=0.01
+    cylinder_x,cylinder_y,cylinder_z = data_for_Ycylinder(cylinder_c[0],cylinder_c[2],radius=cylinder_r,height=0.1)
+
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     line = ax.plot(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2])
+    points = ax.scatter(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2], s=2, c='y')
+    ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
     # line = ax.plot(p[:,0],p[:,1],p[:,2])
-    # ax.quiver(p[:,0],p[:,1],p[:,2], v[:,0],v[:,1],v[:,2], normalize=False)
+    forces = [ax.quiver(p_traj[0,1:,0],p_traj[0,1:,1],p_traj[0,1:,2],
+               fc_traj[0,:,0],fc_traj[0,:,1],fc_traj[0,:,2], normalize=False)]
     ax.axis('equal')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_zlabel('z')
+    ax.set_zlim([0,0.2])
+    ax.set_aspect('equal')
     # plt.show()
     # print(line[0].get_data_3d())
 
     def update(frame):
         # update the line plot:
         line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
-        return line
+        points.set_offsets(p_traj[frame,:,0:2]) # x,y
+        points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
+
+        forces[0].remove()
+        forces[0] = ax.quiver(p_traj[frame,1:,0],p_traj[frame,1:,1],p_traj[frame,1:,2],
+               fc_traj[frame,:,0],fc_traj[frame,:,1],fc_traj[frame,:,2], normalize=False)
+        ax.set_aspect('equal')
+        return line, points, forces[0]
 
 
     ani = animation.FuncAnimation(fig=fig, func=update, frames=100, interval=5)
