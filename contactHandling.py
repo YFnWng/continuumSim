@@ -26,7 +26,6 @@ def contact_force(g,bpt,ds_end,k,alpha,mu,sigma,SDF):
     slip = vtnorm >= sigma
     t = vt[slip,:]/vtnorm[slip,None]
     fc[slip] -= mu*lambda_n[slip]*t
-    FL = fc[-1,:]*ds_end
-    fc = fc
+    FL = fc[...,-1,:]*ds_end
 
-    return FL,fc[:-1,:]
+    return FL,fc[...,:-1,:]
