@@ -97,6 +97,8 @@ class continuumRobot_GVS:
         self.sk = self.sk*self.L
         self.sq = self.sq*self.L
 
+        self.DOmegaDq_term1 = self.hg[...,None,None]/2*(self.Bz1+self.Bz2)
+
         # time integration parameters
         # self.BDF(0,5e-3)
 
@@ -234,7 +236,7 @@ class continuumRobot_GVS:
         Z2 = np.sqrt(3)*hg**2/12
         Omega = hg/2*(xi_z1+xi_z2) + \
             Z2*np.squeeze((ad_xi_z1@xi_z2[...,None]),axis=-1) # 4th-order Zanna collocation (4.19)
-        DOmegaDq  = hg[...,None]/2*(self.Bz1+self.Bz2) + \
+        DOmegaDq  = self.DOmegaDq_term1 + \
                     Z2[...,None]*(ad_xi_z1@self.Bz2-ad(xi_z2)@self.Bz1) # (batch, nz, 6, dof)
 
         # D2OmegaDq2 = 2*Z2[...,None]*(ad(np.squeeze(self.Bz1@qdot[...,None,:,None],axis=-1))@self.Bz2)
