@@ -229,7 +229,7 @@ class continuumRobot_GVS:
         qddot = -self.Newmark[1,0]*q + hqddot
         res,g,M = self.Cosserat_dynamic_residual(q, qdot, qddot, u)
         self.dynamic_residual = ca.Function('dynamic_residual',[q, hqdot, hqddot, u], 
-                                            [res, qdot, qddot, ca.horzcat(*g), M],
+                                            [res, qdot, qddot, g, M],
                                             ['q','hqdot','hqddot','u'],['residual','qdot','qddot','g','M'])
         self.dynamic_solver = ca.rootfinder('dynamic_solver','newton',self.dynamic_residual, root_options)
         # self.dynamic_solver = ca.rootfinder('dynamic_solver','nlpsol',self.dynamic_residual, root_options)
@@ -379,7 +379,7 @@ class continuumRobot_GVS:
             fc[i] = fc[i] + g[i+1][0:3,0:3].T@self.rhoAg # 3
             f = f + wq[i]*J[i][0:3,:].T@fc[i]
 
-        return M@qddot + (C+self.D)@qdot + self.K@q - A@tau - f, g, M
+        return M@qddot + (C+self.D)@qdot + self.K@q - A@tau - f, ca.reshape(ca.horzcat(*g),16*self.ng,1), ca.reshape(M,self.dof**2,1)
 
     def Cosserat_static_residual(self, q, u):
         # Kq = Au + f
@@ -486,8 +486,9 @@ class continuumRobot_GVS:
                 q = sol["q"]
                 qdot = sol["qdot"]
                 qddot = sol["qddot"]
-                M = sol["M"]
-                g = np.swapaxes(np.array(sol['g'].T).reshape((-1,4,4)),-1,-2)
+                M = ca.reshape(sol["M"],self.dof,self.dof)
+                g = ca.reshape(sol['g'],4,4*self.ng)
+                g = np.swapaxes(np.array(g.T).reshape((-1,4,4)),-1,-2)
                 # JT = np.swapaxes(np.array(sol['J'].T).reshape((-1,self.dof,6)),-1,-2)
 
                 qqq = np.array(ca.horzcat(q,qdot,qddot).T)
@@ -590,7 +591,7 @@ def main():
     }
     
     TDCR2 = GVS.continuumRobot_GVS(MP, model="Kirchhoff", batch=1)
-    TDCR = continuumRobot_GVS(MP, dt=15e-3, model="Kirchhoff", baseline=TDCR2)
+    TDCR = continuumRobot_GVS(MP, dt=15e-3, model="Kirchhoff")
     
     # # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     # q = np.zeros((TDCR.nb*3))
