@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from SE3_casadi import *
 from contact_casadi import *
+import continuumRobot_GVS as GVS
 
 class continuumRobot_GVS:
-    def __init__(self, MP, deg=4, p=3, nb=12, batch=1, model="Cosserat"):
+    def __init__(self, MP, deg=4, p=3, nb=12, dt=5e-3, model="Cosserat", baseline=None):
+        self.TDCR2 = baseline
         # space integration parameters
         # self.N = 41
         self.L = MP["L"]
@@ -98,7 +100,8 @@ class continuumRobot_GVS:
         self.DOmegaDq_term1 = self.hg[...,None,None]/2*(self.Bz1+self.Bz2)
 
         # time integration parameters
-        # self.BDF(0,5e-3)
+        self.dt = dt
+        self.Newmark_init()
 
         # mechanical properties
         self.r = MP["r"]
@@ -145,12 +148,13 @@ class continuumRobot_GVS:
         self.rt = MP["rt"]
         # self.rt_hat = hat(self.rt)
         self.rt = self.rt.T
-        self.udof = int(np.shape(self.rt)[-1]/2)
+        self.nt = np.shape(self.rt)[-1]
+        self.udof = int(self.nt/2)
 
         # Generalized stiffness matrix
-        self.K = np.sum(self.wq[:,None,None]*self.BqT@self.Ks[None,...]@self.Bq, axis=0)
+        self.K = self.L*np.sum(self.wq[:,None,None]*self.BqT@self.Ks[None,...]@self.Bq, axis=0)
         # Generalized damping matrix
-        self.D = np.sum(self.wq[:,None,None]*self.BqT@self.Ds[None,...]@self.Bq, axis=0)
+        self.D = self.L*np.sum(self.wq[:,None,None]*self.BqT@self.Ds[None,...]@self.Bq, axis=0)
         
         # controllables
         self.tau = np.zeros_like(self.rt[0])
@@ -165,55 +169,89 @@ class continuumRobot_GVS:
         # self.WL = np.concatenate((self.FL,self.ML))
 
         # symbolic variables
-        self.q = ca.SX.sym('q',self.dof)
-        self.qdot = ca.SX.sym('qdot',self.dof)
-        self.qddot = ca.SX.sym('qddot',self.dof)
-        self.qqq = ca.horzcat(self.q,self.qdot,self.qddot)
-        self.u = ca.SX.sym('u',self.udof)
+        q = ca.SX.sym('q',self.dof)
+        qdot = ca.SX.sym('hqdot',self.dof)
+        hqdot = ca.SX.sym('hqdot',self.dof)
+        hqddot = ca.SX.sym('hqddot',self.dof)
+        # self.qqq = ca.horzcat(self.q,self.qdot,self.qddot)
+        u = ca.SX.sym('u',self.udof)
 
         # cache
-        self.g = [ca.SX.eye(4)] # better implemented as R, p
-        self.J = [ca.SX(6,self.dof)]
-        self.Jdot = [ca.SX(6,self.dof)]
-        self.eta = [ca.SX(6,1)]
-        for i in range(self.ng):
-            self.g.append(ca.SX.eye(4))
-            self.J.append(ca.SX(6,self.dof))
-            self.Jdot.append(ca.SX(6,self.dof))
-            self.eta.append(ca.SX(6,1))
-        self.M = ca.SX(self.dof,self.dof)
-        self.C = ca.SX(self.dof,self.dof)
-        self.A = ca.SX(self.dof,self.rt.shape[1])
-        self.f = ca.SX(self.dof,1)
+        # self.g = [ca.SX.eye(4)] # better implemented as R, p
+        # self.J = [ca.SX(6,self.dof)]
+        # self.Jdot = [ca.SX(6,self.dof)]
+        # self.eta = [ca.SX(6,1)]
+        # for i in range(self.ng-1):
+        #     self.g.append(ca.SX.eye(4))
+        #     self.J.append(ca.SX(6,self.dof))
+        #     self.Jdot.append(ca.SX(6,self.dof))
+        #     self.eta.append(ca.SX(6,1))
+        # self.M = ca.SX(self.dof,self.dof)
+        # self.C = ca.SX(self.dof,self.dof)
+        # self.A = ca.SX(self.dof,self.rt.shape[1])
+        # self.f = ca.SX(self.dof,1)
 
         # casadi functions
-        self.static_residual = ca.Function('static_residual',[self.q, self.u], [self.Cosserat_static_residual(self.q, self.u)],
-                                           ['q','u'],['residual'])
-        self.static_solver = ca.rootfinder('static_solver','newton',self.static_residual)
-
-        J = ca.jacobian(self.static_residual(self.q,self.u), self.q)
-        self.J_fun = ca.Function('J', [self.q,self.u], [J], ['q','u'],['static_jacobian'])
-
-        # self.dynamic_residual = ca.Function('dynamic_residual',[self.q, self.qdot, self.u], self.Cosserat_dynamic_residual(self.q, self.qdot, self.u))
-
-
+        g, J, eta = self.forward_kinematics(q, qdot)
+        self.FK = ca.Function('forward_kinematics',[q, qdot], [ca.horzcat(*g), ca.horzcat(*J), ca.horzcat(*eta)],
+                                           ['q','qdot'],['g','J','eta'])
         
 
-    def set_state(self,q,qdot):
-        self.qqq[...,0,:] = q
-        self.qqq[...,1,:] = qdot
+        jit_options = {"flags": ["-O3"], "verbose": True}
+        func_options = {'print_time': True, 'record_time': True, 'verbose': False,
+                        'enable_fd': True, 'enable_forward': True, 'enable_jacobian': True, 'enable_reverse': True,
+                        'jit': False, "compiler": "shell", "jit_options": jit_options}
+        res,g = self.Cosserat_static_residual(q, u)
+        self.static_residual = ca.Function('static_residual',[q, u], [res, ca.horzcat(*g)],
+                                           ['q','u'],['residual','g'], func_options).expand()
+        # res,fcq = self.Cosserat_static_residual(self.q, self.u)
+        # self.static_residual = ca.Function('static_residual',[self.q, self.u], [res,fcq],
+        #                                    ['q','u'],['residual','g'], func_options).expand()
+        # self.static_residual.print_options()
+        # self.static_residual = ca.Function('static_residual',[self.q, self.u], [self.Cosserat_static_residual(self.q, self.u)],
+        #                                    ['q','u'],['residual'])
+        root_options = {'print_iteration': True, 'print_time': True, 'record_time': True, 'verbose': False, 'expand': True,
+                        'enable_fd': False, 'enable_forward': True, 'enable_jacobian': True, 'enable_reverse': True,
+                        'jit': False, "compiler": "shell", "jit_options": jit_options}
+        self.static_solver = ca.rootfinder('static_solver','newton',self.static_residual, root_options)
 
-    def Newmark_init(self, dt=5e-3, beta=1/4, gamma=1/2):
-        self.dt = dt
-        self.Newmark = np.array([[-gamma/(beta*dt),(1-gamma/beta),(1-gamma/(2*beta))*dt],
-                                 [-1/(beta*dt**2),-1/(beta*dt),1-1/(2*beta)]])
-        self.hqdot = self.Newmark[0]@self.qqq
-        self.hqddot = self.Newmark[1]@self.qqq
+        # root_options = {'nlpsol':'ipopt', 'expand': True, #'jacobian_options': {'finite_difference': True},
+        #                 'record_time': True, 'print_time': True, 'verbose': False,
+        #                 'enable_fd': False, 'enable_forward': True, 'enable_jacobian': True, 'enable_reverse': True}
+        # self.static_solver = ca.rootfinder('static_solver',"nlpsol", self.static_residual, root_options)
+
+        # res, _ = self.static_residual(self.q,self.u)
+        # J = ca.jacobian(res, self.q)
+        # self.J_fun = ca.Function('J', [self.q,self.u], [J], ['q','u'],['static_jacobian']).expand()
+
+        
+        qdot = -self.Newmark[0,0]*q + hqdot
+        qddot = -self.Newmark[1,0]*q + hqddot
+        res,g,M = self.Cosserat_dynamic_residual(q, qdot, qddot, u)
+        self.dynamic_residual = ca.Function('dynamic_residual',[q, hqdot, hqddot, u], 
+                                            [res, qdot, qddot, ca.horzcat(*g), M],
+                                            ['q','hqdot','hqddot','u'],['residual','qdot','qddot','g','M'])
+        self.dynamic_solver = ca.rootfinder('dynamic_solver','newton',self.dynamic_residual, root_options)
+        # self.dynamic_solver = ca.rootfinder('dynamic_solver','nlpsol',self.dynamic_residual, root_options)
+
+
+    # def set_state(self,q,qdot):
+    #     self.qqq[...,0,:] = q
+    #     self.qqq[...,1,:] = qdot
+
+    def Newmark_init(self, beta=1/4, gamma=1/2):
+        self.Newmark = np.array([[-gamma/(beta*self.dt),(1-gamma/beta),(1-gamma/(2*beta))*self.dt],
+                                 [-1/(beta*self.dt**2),-1/(beta*self.dt),1-1/(2*beta)]])
+        # self.hqdot = self.Newmark[0]@self.qqq
+        # self.hqddot = self.Newmark[1]@self.qqq
     
     def forward_kinematics(self, q, qdot):
         hg = self.hg
         Z2 = np.sqrt(3)*hg**2/12
 
+        g = [ca.SX.eye(4)]
+        J = [ca.SX(6,self.dof)]
+        eta = [ca.SX(6,1)]
         for i in range(self.ng-1):
             xi_z1 = self.Bz1[i]@q + self.xisr # body twist at all Zanna quadrature points
             xi_z2 = self.Bz2[i]@q + self.xisr # q shape (dof), result shape (6)
@@ -231,13 +269,15 @@ class continuumRobot_GVS:
 
             AdinvexpOmega = Adinv(expOmega)
             J_rel = dexpOmega@DOmegaDq
-            self.g[i+1] = self.g[i]@expOmega
-            self.J[i+1] = AdinvexpOmega@(self.J[i] + J_rel)
+            g.append(g[i]@expOmega)
+            J.append(AdinvexpOmega@(J[i] + J_rel))
         
-            self.eta[i+1] = self.J[i]@qdot
+            eta.append(J[i]@qdot)
             # Jdot_rel = ad(self.eta[...,:-1,:])@J_rel + ddexpOmegadt@DOmegaDq + dexpOmega@D2OmegaDq2
             # for i in range(self.ng-1):
             #     self.Jdot[...,i+1,:,:] = AdinvexpOmega[...,i,:,:]@(self.Jdot[...,i,:,:] + Jdot_rel[...,i,:,:])
+
+        return g, J, eta
 
 
     def Cosserat_dynamic_ODE(self, t, y):
@@ -298,50 +338,48 @@ class continuumRobot_GVS:
         tau = ca.vertcat(u,-u)
 
         # forward kinematics
-        self.forward_kinematics(q,qdot)
+        g, J_all, eta = self.forward_kinematics(q,qdot)
         
         # cache
         wq = self.L*self.wq
         Bq = self.Bq
         Ms = self.Ms#[None,...]
-        J = self.J[1:-1]
-        JLT = self.J[-1].T
+        J = J_all[1:-1]
+        JLT = J_all[-1].T
         rt = self.rt # None x 3 x nt
 
         # external forces
-        FL,fc = contactForce(self.g[1:],self.eta[1:],self.hg[-1])
-        FL += self.g[-1][0:3,0:3].T@self.FL
-        self.f += JLT[:,0:3]@FL
+        FL,fc = contactForce(g[1:],eta[1:],self.hg[-1])
+        FL = FL + g[-1][0:3,0:3].T@self.FL
+        f = JLT[:,0:3]@FL
+
+        M = ca.SX(self.dof,self.dof)
+        C = ca.SX(self.dof,self.dof)
+        A = ca.SX(self.dof,self.nt)
 
         for i in range(self.nq):
             xiq = Bq[i]@q + self.xisr # 6 x 1
 
             # Generalized mass matrix
-            self.M += wq[i]*J[i].T@Ms@J[i] # batch x dof x dof
+            M = M + wq[i]*J[i].T@Ms@J[i] # batch x dof x dof
 
             # Generalized centrifugal & Coriolis matrix
             # self.C = np.sum(wq*JT@(Ms@self.Jdot[...,1:-1,:,:]+coad(self.eta[...,1:-1,:])@Ms@J), axis=-3)
-            self.C += wq[i]*J[i].T@(coad(self.eta[i+1])@Ms@J[i])
+            C = C + wq[i]*J[i].T@(coad(eta[i+1])@Ms@J[i])
 
             # Generalized actuation
-            pbs = ca.cross(ca.repmat(xiq[3:6],1,np.shape(rt)[-1]),rt) + xiq[0:3] # 3 x nt
-            pbs_norm = ca.sqrt(ca.sum2(pbs**2)) # 1 x nt
-            pbs_n = pbs / pbs_norm # 3 x nt
+            pbs = ca.cross(ca.repmat(xiq[3:6],1,self.nt),rt) + xiq[0:3] # 3 x nt
+            pbs_norm = ca.sqrt(ca.sum1(pbs**2)) # 1 x nt
+            pbs_n = (pbs.T / pbs_norm.T).T # 3 x nt
             Act = ca.vertcat(pbs_n, ca.cross(rt,pbs_n)) # 6 x nt
 
-            self.A -= wq[i]*self.BqT[i]@Act # dof x nt
+            A = A - wq[i]*self.BqT[i]@Act # dof x nt
 
             # Generalized external load
-            fc[i] += self.g[i+1][0:3,0:3].T@self.rhoAg # 3
-            self.f += wq[i]*J[i][0:3,:].T@fc[i]
+            fc[i] = fc[i] + g[i+1][0:3,0:3].T@self.rhoAg # 3
+            f = f + wq[i]*J[i][0:3,:].T@fc[i]
 
-        return self.M@qddot + (self.C+self.L*self.D)@qdot + self.L*self.K@q - self.A@tau - self.f
-    
-    def Newmark_residual(self, q, u):
-        q = np.reshape(q,(-1,self.dof))
-        qdot = -self.Newmark[0,0]*q + self.hqdot
-        qddot = -self.Newmark[1,0]*q + self.hqddot
-        return self.Cosserat_dynamic_residual(q, qdot, qddot, u)
+        return M@qddot + (C+self.D)@qdot + self.K@q - A@tau - f, g, M
 
     def Cosserat_static_residual(self, q, u):
         # Kq = Au + f
@@ -349,96 +387,187 @@ class continuumRobot_GVS:
         tau = ca.vertcat(u,-u)
 
         # forward kinematics
-        self.forward_kinematics(q,np.zeros(self.dof))
+        g, J_all, eta = self.forward_kinematics(q,np.zeros(self.dof))
         
         # cache
         wq = self.L*self.wq
         Bq = self.Bq
-        J = self.J[1:-1]
-        JLT = self.J[-1].T
+        J = J_all[1:-1]
+        JLT = J_all[-1].T
         rt = self.rt#[None,...] # None x 3 x nt
 
         # external forces
-        FL,fc = contactForce(self.g[1:],self.eta[1:],self.hg[-1])
-        FL += self.g[-1][0:3,0:3].T@self.FL
-        self.f += JLT[:,0:3]@FL
+        FL,fc = contactForce(g[1:],eta[1:],self.hg[-1])
+        FL = FL + g[-1][0:3,0:3].T@self.FL
+        f = JLT[:,0:3]@FL
+
+        A = ca.SX(self.dof,self.nt)
 
         for i in range(self.nq):
             xiq = Bq[i]@q + self.xisr # 6 x 1
 
             # Generalized actuation
-            pbs = ca.cross(ca.repmat(xiq[3:6],1,np.shape(rt)[-1]),rt) + xiq[0:3] # 3 x nt
-            pbs_norm = ca.sqrt(ca.sum2(pbs**2)) # 1 x nt
-            pbs_n = pbs / pbs_norm # 3 x nt
+            pbs = ca.cross(ca.repmat(xiq[3:6],1,self.nt),rt) + xiq[0:3] # 3 x nt
+            pbs_norm = ca.sqrt(ca.sum1(pbs**2)) # 1 x nt
+            pbs_n = (pbs.T / pbs_norm.T).T # 3 x nt
             Act = ca.vertcat(pbs_n, ca.cross(rt,pbs_n)) # 6 x nt
 
-            self.A -= wq[i]*self.BqT[i]@Act # dof x nt
+            A = A - wq[i]*self.BqT[i]@Act # dof x nt
 
             # Generalized external load
-            fc[i] += self.g[i+1][0:3,0:3].T@self.rhoAg # 3
-            self.f += wq[i]*J[i][0:3,:].T@fc[i]
+            fc[i] = fc[i] + g[i+1][0:3,0:3].T@self.rhoAg # 3
+            f = f + wq[i]*J[i][0:3,:].T@fc[i]
 
-        return self.L*self.K@q - self.A@tau - self.f
+        return self.K@q - A@tau - f, g
     
-    # def static_solve(self, u, ig):
-    #     sol = root(lambda q: self.Cosserat_static_residual(q,u), x0=ig)
-    #     print("success?",sol.success)
-    #     print(sol.status)
-    #     print(sol.message)
-    #     print("nfev: ",sol.nfev)
-    #     # print("njev: ",sol.njev)
-    #     return sol.x
+    def static_solve(self, u, q0, plot = False):
+        sol = self.static_solver(q0=q0, u=u)
+        print(self.static_solver.stats())
+
+        q = np.array(sol['q']).flatten()
+        g = np.swapaxes(np.array(sol['g'].T).reshape((-1,4,4)),-1,-2)
+
+        q2 = self.TDCR2.static_solve(u, q)
+        self.TDCR2.forward_kinematics(q2,np.zeros_like(q2))
+        # print(q-q2)
+
+        # t0 = time.time()
+        # res11,_ = self.static_residual(q,u)
+        # # print(self.static_residual.stats())
+        # t1 = time.time()
+        # res12 = self.TDCR2.Cosserat_static_residual(q,u)
+        # t2 = time.time()
+        # J = self.J_fun(q,u)
+        # # print(self.J_fun.stats())
+        # t3 = time.time()
+        # print('casadi f eval: ', t1-t0)
+        # print('numpy f eval: ', t2-t1)
+        # print('casadi j eval:', t3-t2)
+        # print((t1-t0)*36)
+        # print(J.shape)
+
+        if plot: 
+            # print(q)
+            p = g[:,0:3,3]
+            p2 = self.TDCR2.g[0,:,0:3,3]
+
+            fig = plt.figure()
+            ax = fig.add_subplot(projection='3d')
+            line = ax.plot(p[:,0],p[:,1],p[:,2])
+            ax.plot(p2[:,0],p2[:,1],p2[:,2])
+            ax.axis('equal')
+            plt.show()
+
+        return q, g
     
-    # def roll_out(self, u, t_span, method="Newmark"):
-    #     # y0 = np.concatenate((self.q,self.qdot))
-    #     # rollout = solve_ivp(self.Cosserat_dynamic_ODE, t_span, y0, method="Radau", t_eval=np.linspace(t_span[0],t_span[1],101))
-    #     # print(rollout.message)
-    #     # print("nfev = ",rollout.nfev)
-    #     # print("njev = ",rollout.njev)
-    #     # return rollout.t, rollout.y
+    def roll_out(self, qqq, u, t_span, method="Newmark"):
+        num_step = np.round((t_span[1]-t_span[0])/self.dt).astype(np.int64)
+        t_eval = np.linspace(t_span[0],t_span[1],num_step+1)
+        q_traj = np.zeros((num_step+1,3,self.dof))
+        p_traj = np.zeros((num_step+1,self.ng,3))
+        q_traj[0] = qqq
+        g,_,_ = self.FK(qqq[0],qqq[1])
+        g = np.swapaxes(np.array(g).T.reshape((-1,4,4)),-1,-2)
+        p_traj[0] = g[...,0:3,3]
+        # fc_traj = np.zeros((num_step+1,self.ng-1,3))
+        Ek = np.zeros(num_step)
+        Ep = np.zeros(num_step)
+        Ee = np.zeros(num_step)
 
-    #     dt = 15e-3
-    #     num_step = np.round((t_span[1]-t_span[0])/dt).astype(np.int64)
-    #     t_eval = np.linspace(t_span[0],t_span[1],num_step+1)
-    #     q_traj = np.zeros((self.batch,num_step+1,3,self.dof))
-    #     p_traj = np.zeros((self.batch,num_step+1,self.ng,3))
-    #     q_traj[:,0] = self.qqq
-    #     p_traj[:,0] = self.g[...,0:3,3]
-    #     fc_traj = np.zeros((self.batch,num_step+1,self.ng-1,3))
-    #     Ek = np.zeros(num_step)
-    #     Ep = np.zeros(num_step)
-    #     Ee = np.zeros(num_step)
+        if method == "Newmark":
+            for i in range(num_step):
+                hqdot = self.Newmark[0]@qqq
+                hqddot = self.Newmark[1]@qqq
+                sol = self.dynamic_solver(q0=qqq[0], hqdot=hqdot.T, hqddot=hqddot.T, u=u)
+                # stats = self.dynamic_solver.stats()
+                # print('solver time: ', stats['t_wall_total'])
+                # print('num iteration: ', stats['iter_count'])
+                # print('solver return: ', stats['return_status'])
+                q = sol["q"]
+                qdot = sol["qdot"]
+                qddot = sol["qddot"]
+                M = sol["M"]
+                g = np.swapaxes(np.array(sol['g'].T).reshape((-1,4,4)),-1,-2)
+                # JT = np.swapaxes(np.array(sol['J'].T).reshape((-1,self.dof,6)),-1,-2)
 
-    #     if method == "Newmark":
-    #         self.Newmark_init(dt = dt)
-    #         for i in range(num_step):
-    #             t0 = time.time()
-    #             sol = root(lambda q: self.Newmark_residual(q,u[i]), x0=q_traj[...,i,0,:])
-    #             t1 = time.time()
-    #             print("root finding time: ",t1-t0)
-    #             print(sol.message)
-    #             q = np.reshape(sol.x,(-1,self.dof))
-    #             qdot = -self.Newmark[0,0]*q + self.hqdot
-    #             qddot = -self.Newmark[1,0]*q + self.hqddot
-    #             self.qqq = np.stack((q,qdot,qddot),axis=-2)
-    #             q_traj[:,i+1] = self.qqq
-    #             self.forward_kinematics(q, qdot)
-    #             p_traj[:,i+1] = self.g[...,:,0:3,3]
-    #             self.hqdot = self.Newmark[0]@self.qqq
-    #             self.hqddot = self.Newmark[1]@self.qqq
+                qqq = np.array(ca.horzcat(q,qdot,qddot).T)
+                q_traj[i+1] = qqq
+                p_traj[i+1] = g[:,0:3,3]
 
-    #             fc_traj[:,i+1,-1,:],fc_traj[:,i+1,:-1,:] = contactForce(self.g[...,1:,:,:],self.eta[...,1:,0:3],1)
-    #             # fc_traj[:,i+1,:-1,:] = fc_traj[:,i+1,:-1,:] + self.rhoAg
+                # fc_traj[:,i+1,-1,:],fc_traj[:,i+1,:-1,:] = contactForce(self.g[...,1:,:,:],self.eta[...,1:,0:3],1)
+                # fc_traj[:,i+1,:-1,:] = fc_traj[:,i+1,:-1,:] + self.rhoAg
 
-    #             J = self.J[...,1:-1,:,:]
-    #             JT = np.swapaxes(J,-1,-2)
-    #             wq = self.L*self.wq
-    #             M = np.sum(wq[:,None,None]*JT@self.Ms@J, axis=-3) # batch x dof x dof
-    #             Ek[i] = qdot@M@qdot.T/2
-    #             Ep[i] = -self.rhoAg[0]*np.sum(wq*self.g[0,1:-1,0,3]) - self.FL[0]*self.g[0,-1,0,3]
-    #             Ee[i] = self.L*q@self.K@q.T/2
+                wq = self.L*self.wq
+                Ek[i] = qdot.T@M@qdot/2
+                Ep[i] = -self.rhoAg[0]*np.sum(wq*g[1:-1,0,3]) - np.array(ca.DM(self.FL[0])).T*g[-1,0,3]
+                Ee[i] = self.L*q.T@self.K@q/2
 
-    #     return t_eval, q_traj, p_traj, fc_traj, Ek, Ep, Ee
+        # energy
+        fig,ax = plt.subplots()
+        # ax.plot(t,p_traj[0,:,-1,0])
+        ax.plot(t_eval[1:],Ek)
+        ax.plot(t_eval[1:],Ep)
+        ax.plot(t_eval[1:],Ee)
+        ax.plot(t_eval[1:],Ek+Ep+Ee)
+        plt.show()
+
+        # system states
+        fig,ax = plt.subplots(3)
+        xi_traj = np.squeeze(self.Bg@q_traj[...,None,:,None],axis=-1) # ng na dof x t 3 1 dof 1 = t 3 ng na 1
+        qline = ax[0].plot(self.sg,xi_traj[0,0,:,4])
+        ax[0].set_ylim((-20,20))
+        qdline = ax[1].plot(self.sg,xi_traj[0,1,:,4])
+        ax[1].set_ylim((-50,50))
+        qddline = ax[2].plot(self.sg,xi_traj[0,2,:,4])
+        ax[2].set_ylim((-100,100))
+        def update(frame):
+            # update the line plot:
+            qline[0].set_ydata(xi_traj[frame,0,:,4])
+            qdline[0].set_ydata(xi_traj[frame,1,:,4])
+            qddline[0].set_ydata(xi_traj[frame,2,:,4])
+            return qline,qdline,qddline
+        ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
+        plt.show()
+
+        # workspace simulation
+        fig = plt.figure()
+        ax = fig.add_subplot(projection='3d')
+        line = ax.plot(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2])
+        points = ax.scatter(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2], s=2, c='y')
+        ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
+        # line = ax.plot(p[:,0],p[:,1],p[:,2])
+        # forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
+        #         fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
+        ax.axis('equal')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+        ax.set_zlim([0,0.2])
+        ax.set_aspect('equal')
+        # plt.show()
+        # print(line[0].get_data_3d())
+
+        def update(frame):
+            # update the line plot:
+            line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
+            points.set_offsets(p_traj[frame,:,0:2]) # x,y
+            points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
+
+            # forces[0].remove()
+            # forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
+            #     fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
+            # ax.set_aspect('equal')
+            return line, points #, forces[0]
+
+
+        ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
+        plt.show()
+        # writer = animation.PillowWriter(fps=200,
+        #                                 metadata=dict(artist='Me'),
+        #                                 bitrate=1800)
+        # ani.save(filename="/continuumSim/figures/rod_slipping.gif", writer=writer)
+
+        return t_eval, q_traj, p_traj, Ek, Ep, Ee
 
 
 def main():
@@ -460,15 +589,8 @@ def main():
                     [0,-delta,0]])
     }
     
-    TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
-
-    def tau(t):
-        # if t <= 0:
-        #     return np.array([20,0,0,0])
-        # else:
-        #     return np.zeros(4)
-        return np.zeros(4)
-
+    TDCR2 = GVS.continuumRobot_GVS(MP, model="Kirchhoff", batch=1)
+    TDCR = continuumRobot_GVS(MP, dt=15e-3, model="Kirchhoff", baseline=TDCR2)
     
     # # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
     # q = np.zeros((TDCR.nb*3))
@@ -480,87 +602,19 @@ def main():
     # # qdot = np.ones((TDCR.nb*3))*10
     # TDCR.forward_kinematics(q,qdot)
 
-    J0 = TDCR.J_fun(q = np.zeros((TDCR.nb*3)), u=[0,0])
+    # q,g = TDCR.static_solve(u=np.zeros(2), q0=np.ones(TDCR.dof), plot=True)
 
-    for i in range(TDCR.dof):
-        print(J0['static_jacobian'][i,:])
+    t, q_traj, p_traj, Ek, Ep, Ee = TDCR.roll_out(qqq=np.zeros((3,TDCR.dof)), u=np.array([0,0]), t_span=np.array([0,1.0]))
 
-    t0 = time.time()
-    q = TDCR.static_solver(q0=np.zeros((TDCR.nb*3)), u=[0,0])
+    # res0 = TDCR.static_residual(q = np.zeros((TDCR.nb*3)), u=[0,0])
+    # print(res0)
+    # print(TDCR.g)
+    # print(TDCR.eta)
+    # J0 = TDCR.J_fun(q = np.zeros((TDCR.nb*3)), u=[0,0])
 
-    # t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(tau,np.array([0,1.0]))
+    # for i in range(TDCR.dof):
+    #     print(J0['static_jacobian'][i,:])
 
-    t1 = time.time()
-    print("total time: ", t1-t0)
-
-    print(q)
-
-    num_step = np.shape(Ek)[0]
-
-    # energy
-    fig,ax = plt.subplots()
-    # ax.plot(t,p_traj[0,:,-1,0])
-    ax.plot(t[1:],Ek)
-    ax.plot(t[1:],Ep)
-    ax.plot(t[1:],Ee)
-    ax.plot(t[1:],Ek+Ep+Ee)
-    plt.show()
-
-    # system states
-    fig,ax = plt.subplots(3)
-    xi_traj = np.squeeze(TDCR.Bg@q_traj[...,None,:,None],axis=-1)
-    qline = ax[0].plot(TDCR.sg,xi_traj[0,0,0,:,4])
-    ax[0].set_ylim((-20,20))
-    qdline = ax[1].plot(TDCR.sg,xi_traj[0,0,1,:,4])
-    ax[1].set_ylim((-50,50))
-    qddline = ax[2].plot(TDCR.sg,xi_traj[0,0,2,:,4])
-    ax[2].set_ylim((-100,100))
-    def update(frame):
-        # update the line plot:
-        qline[0].set_ydata(xi_traj[0,frame,0,:,4])
-        qdline[0].set_ydata(xi_traj[0,frame,1,:,4])
-        qddline[0].set_ydata(xi_traj[0,frame,2,:,4])
-        return qline,qdline,qddline
-    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
-    plt.show()
-
-    # workspace simulation
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    line = ax.plot(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2])
-    points = ax.scatter(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2], s=2, c='y')
-    ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
-    # line = ax.plot(p[:,0],p[:,1],p[:,2])
-    forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
-               fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
-    ax.axis('equal')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_zlabel('z')
-    ax.set_zlim([0,0.2])
-    ax.set_aspect('equal')
-    # plt.show()
-    # print(line[0].get_data_3d())
-
-    def update(frame):
-        # update the line plot:
-        line[0].set_data_3d(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2])
-        points.set_offsets(p_traj[0,frame,:,0:2]) # x,y
-        points.set_3d_properties(p_traj[0,frame,:,2],zdir='z') # z
-
-        forces[0].remove()
-        forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
-               fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
-        ax.set_aspect('equal')
-        return line, points, forces[0]
-
-
-    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
-    plt.show()
-    # writer = animation.PillowWriter(fps=200,
-    #                                 metadata=dict(artist='Me'),
-    #                                 bitrate=1800)
-    # ani.save(filename="/continuumSim/figures/rod_slipping.gif", writer=writer)
 
 if __name__ == "__main__":
     main()

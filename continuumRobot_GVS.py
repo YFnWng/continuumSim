@@ -344,10 +344,13 @@ class continuumRobot_GVS:
         fc  = self.rhoAg@self.g[...,1:-1,0:3,0:3] + fc # batch x nq x 3
         FL = FL + self.FL@self.g[...,-1,0:3,0:3]
         w = np.concatenate((fc,np.zeros_like(fc)),axis=-1)
-        self.f = np.sum(wq*JT@w[...,None], axis=-3) + \
+        # self.f = np.sum(wq*JT@w[...,None], axis=-3) + \
+        #             JLT@(np.concatenate((FL,np.zeros_like(FL)),axis=-1)[...,None])
+        self.f = np.sum(wq*JT[...,0:3]@fc[...,None], axis=-3) + \
                     JLT@(np.concatenate((FL,np.zeros_like(FL)),axis=-1)[...,None])
                     
         tau = np.concatenate((u,-u), axis=-1)
+
         return (self.M@qddot[...,None] + (self.C+self.L*self.D)@qdot[...,None] + 
                           self.L*self.K@q[...,None] - self.A@tau[...,None] - self.f).flatten()
     
@@ -438,10 +441,11 @@ class continuumRobot_GVS:
         return (self.L*self.K@q[...,None] - (self.A@tau[...,None] + self.f)).flatten()
     
     def static_solve(self, u, ig):
-        sol = root(lambda q: self.Cosserat_static_residual(q,u), x0=ig)
+        sol = root(lambda q: self.Cosserat_static_residual(q,u), x0=ig, tol=1e-12)
         print("success?",sol.success)
         print(sol.status)
         print(sol.message)
+        # print('residual: ',sol.fun)
         print("nfev: ",sol.nfev)
         # print("njev: ",sol.njev)
         return sol.x
@@ -470,7 +474,7 @@ class continuumRobot_GVS:
             self.Newmark_init(dt = dt)
             for i in range(num_step):
                 t0 = time.time()
-                sol = root(lambda q: self.Newmark_residual(q,u[i]), x0=q_traj[...,i,0,:])
+                sol = root(lambda q: self.Newmark_residual(q,u), x0=q_traj[...,i,0,:])
                 t1 = time.time()
                 print("root finding time: ",t1-t0)
                 print(sol.message)
@@ -629,27 +633,28 @@ def main():
 
     
     # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    q = np.zeros((TDCR.nb*3))
+    q = np.ones((TDCR.nb*3))
     # kappa = 1.90985932
     # q = np.concatenate([np.zeros(TDCR.nb),-np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
     # q = TDCR.static_solve(np.array([0,0,0,0]), q)
     # qdot = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*10,np.zeros(TDCR.nb)])
     qdot = np.zeros_like(q)
     # qdot = np.ones((TDCR.nb*3))*10
-    TDCR.forward_kinematics(q,qdot)
+    # TDCR.forward_kinematics(q,qdot)
     
     # TDCR.set_state(q,qdot)
     # TDCR.tau = tau
     # TDCR.tau = np.array([20,0,0,0])
     # TDCR.tau = np.zeros(4)
-    # t0 = time.time()
-    # TDCR.forward_kinematics(q,q)
-    # x = TDCR.static_solve(np.array([1,0]), q)
-    # print(x[TDCR.nb:2*TDCR.nb])
+    t0 = time.time()
+    x = TDCR.static_solve(np.array([1,0]), q)
+    t1 = time.time()
+    print(t1-t0)
+    print(x)
     # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
 
-    t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(tau,np.array([0,1.0]))
+    # t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(u=np.array([0,0]),t_span=np.array([0,1.0]))
 
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
