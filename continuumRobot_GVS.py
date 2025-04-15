@@ -646,15 +646,15 @@ def main():
     # TDCR.tau = tau
     # TDCR.tau = np.array([20,0,0,0])
     # TDCR.tau = np.zeros(4)
-    t0 = time.time()
-    x = TDCR.static_solve(np.array([1,0]), q)
-    t1 = time.time()
-    print(t1-t0)
-    print(x)
+    # t0 = time.time()
+    # x = TDCR.static_solve(np.array([1,0]), q)
+    # t1 = time.time()
+    # print(t1-t0)
+    # print(x)
     # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
 
-    # t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(u=np.array([0,0]),t_span=np.array([0,1.0]))
+    t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(u=np.array([0,0]),t_span=np.array([0,1.0]))
 
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
@@ -695,36 +695,42 @@ def main():
     # workspace simulation
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    line = ax.plot(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2])
-    points = ax.scatter(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2], s=2, c='y')
+    ax.view_init(elev=16, azim=-103, roll=-94)
+    print(num_step)
+    for frame in range(0,num_step,5):
+        # print(frame)
+        line = ax.plot(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2],c='b')
+        points = ax.scatter(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2], s=2, c='y')
     ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
     # line = ax.plot(p[:,0],p[:,1],p[:,2])
-    forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
-               fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
+    # forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
+    #            fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('z [m]')
+    ax.set_zlim3d([-0.2,0.6])
+    ax.set_ylim3d([-0.2,0.2])
+    ax.set_zlim3d([0,1])
     ax.axis('equal')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_zlabel('z')
-    ax.set_zlim([0,0.2])
-    ax.set_aspect('equal')
-    # plt.show()
+    
+    plt.show()
     # print(line[0].get_data_3d())
 
-    def update(frame):
-        # update the line plot:
-        line[0].set_data_3d(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2])
-        points.set_offsets(p_traj[0,frame,:,0:2]) # x,y
-        points.set_3d_properties(p_traj[0,frame,:,2],zdir='z') # z
+    # def update(frame):
+    #     # update the line plot:
+    #     line[0].set_data_3d(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2])
+    #     points.set_offsets(p_traj[0,frame,:,0:2]) # x,y
+    #     points.set_3d_properties(p_traj[0,frame,:,2],zdir='z') # z
 
-        forces[0].remove()
-        forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
-               fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
-        ax.set_aspect('equal')
-        return line, points, forces[0]
+    #     # forces[0].remove()
+    #     # forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
+    #     #        fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
+    #     # ax.set_aspect('equal')
+    #     return line, points#, forces[0]
 
 
-    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
-    plt.show()
+    # ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
+    # plt.show()
     # writer = animation.PillowWriter(fps=200,
     #                                 metadata=dict(artist='Me'),
     #                                 bitrate=1800)

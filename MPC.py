@@ -34,6 +34,15 @@ class Newmark_MPC:
             for j in range(i+1,0,-1):
                 self.Newmark_C[i,j-1] = C@self.Newmark_C[i,j]
 
+    def Newmark_rollout(self,q,qqq0):
+        dq = q[1:] - q[:-1] # (h-1) x dof
+        q_ = np.vstack((qqq0[None,1:],
+                        self.Newmark_a[None,:,None]*(q[0] - qqq0[0]),
+                        self.Newmark_a[:,None]*dq[:,None,:])) # (h+1) x 2 x dof
+        qd_qdd = np.sum(self.Newmark_C@q_, axis=1) # h x 2 x dof
+        qdot = qd_qdd[:,0] # h x dof
+        qddot = qd_qdd[:,1]
+        return qdot, qddot
 
     def cost(self,x,qqq0,u0,p_d):
         q = np.reshape(x[:self.uid], (self.h,-1))
@@ -70,7 +79,7 @@ class Newmark_MPC:
                    'fun': lambda x: self.dynamic_constraint(x,qqq0)}
 
         res = minimize(lambda x: self.cost(x,qqq0,u0,p_d), x0=guess, method='SLSQP',
-                       bounds = self.b, constraints=[eq_cons], options={'ftol': 0.75e-3})
+                       bounds = self.b, constraints=[eq_cons], options={'ftol': 0.75e-3,'maxiter':20})
 
         print(res.success)
         print(res.message)
@@ -98,7 +107,7 @@ def main():
     }
     weights = {
         "Q": 1.0e+3,
-        "R": 0.0,
+        "R": 0.5,
         "S": 1.0
     }
     bounds = {
@@ -109,72 +118,85 @@ def main():
     }
     
     # TDCR = continuumRobot_GVS(MP, model="Kirchhoff", batch=1)
-    horizon = 6
+    num_step = 60
+    horizon = 1
+    session = int(num_step/horizon)
     dt = 15e-3
+    t = np.linspace(0,num_step,num_step+1)*dt
     MPC = Newmark_MPC(continuumRobot_GVS, MP, weights, bounds, dt=dt, h=horizon)
 
     # Initial conditions
-    # q = np.concatenate([np.zeros(TDCR.nb*3),np.ones(TDCR.nb),np.zeros(TDCR.nb*2)])
-    q0 = np.zeros((MPC.plant.nb*3))
-    # kappa = 1.90985932
-    # q = np.concatenate([np.zeros(TDCR.nb),-np.ones(TDCR.nb)*kappa,np.zeros(TDCR.nb)])
-    # q = TDCR.static_solve(np.array([0,0,0,0]), q)
-    # qdot = np.concatenate([np.zeros(TDCR.nb),np.ones(TDCR.nb)*10,np.zeros(TDCR.nb)])
-    qdot0 = np.zeros_like(q0)
-    # qdot = np.ones((TDCR.nb*3))*10
-    qddot0 = np.zeros_like(q0)
-    u0 = np.zeros(MPC.plant.udof)
-    qqq0 = np.vstack((q0,qdot0,qddot0))
+    # q0 = np.zeros((MPC.plant.nb*3))
+    # qdot0 = np.zeros_like(q0)
+    # # qdot = np.ones((TDCR.nb*3))*10
+    # qddot0 = np.zeros_like(q0)
+    # u0 = np.zeros(MPC.plant.udof)
+    # qqq0 = np.vstack((q0,qdot0,qddot0))
 
-    guess = np.concatenate((np.tile(q0,horizon), np.tile(u0,horizon)))
+    q = np.zeros((num_step+1,MPC.plant.dof))
+    qdot = np.zeros((num_step+1,MPC.plant.dof))
+    qddot = np.zeros((num_step+1,MPC.plant.dof))
+    u = np.zeros((num_step+1,MPC.plant.udof))
 
-    p_d = np.zeros((horizon,3))
-    p_d[:,2] = 1.0
+    p_d = np.zeros((num_step,3))
+    # p_d[:,2] = 1.0
+    p_d[:,2] = np.concatenate((np.linspace(1.0,0.92,25),np.ones(35)*0.92))
+    p_d[25:,0] = np.linspace(0.0,0.15,35)
 
-    t0 = time.time()
-    x = MPC.solve_MPC(guess,qqq0,u0,p_d)
-    t1 = time.time()
-    print("MPC time: ",t1-t0)
+    p_traj = np.zeros((num_step+1,MPC.plant.ng,3))
+    v_traj = np.zeros(num_step+1)
+    for i in range(session):
+        qqq0 = np.vstack((q[i*horizon],qdot[i*horizon],qddot[i*horizon]))
+        u0 = u[i*horizon]
+        guess = np.concatenate((np.tile(qqq0[0],horizon), np.tile(u0,horizon)))
+        t0 = time.time()
+        x = MPC.solve_MPC(guess,qqq0,u0,p_d[i*horizon:(i+1)*horizon])
+        t1 = time.time()
+        print("MPC time: ",t1-t0)
 
-    # MPC.cost(x,qqq0,u0,p_d)
-    cv = MPC.dynamic_constraint(x,qqq0)
-    print("maxcv: ",np.max(np.absolute(cv)))
+        # MPC.cost(x,qqq0,u0,p_d)
+        # cv = MPC.dynamic_constraint(x,qqq0)
+        # print("maxcv: ",np.max(np.absolute(cv)))
 
-    q = np.reshape(x[:MPC.uid], (MPC.h,-1))
-    u = np.reshape(x[MPC.uid:], (MPC.h,-1))
-    du = u[1:] - u[:-1]
-    dq = q[1:] - q[:-1] # (h-1) x dof
-    q_ = np.vstack((qqq0[None,1:],
-                    MPC.Newmark_a[None,:,None]*(q[0] - qqq0[0]),
-                    MPC.Newmark_a[:,None]*dq[:,None,:])) # (h+1) x 2 x dof
-    qd_qdd = np.sum(MPC.Newmark_C@q_, axis=1) # h x 2 x dof
+        q[i*horizon+1:(i+1)*horizon+1] = np.reshape(x[:MPC.uid], (MPC.h,-1))
+        u[i*horizon+1:(i+1)*horizon+1] = np.reshape(x[MPC.uid:], (MPC.h,-1))
+        qdot[i*horizon+1:(i+1)*horizon+1],qddot[i*horizon+1:(i+1)*horizon+1] = MPC.Newmark_rollout(q[i*horizon+1:(i+1)*horizon+1],qqq0)
+
+        p_traj[i*horizon+1:(i+1)*horizon+1] = MPC.plant.g[:,:,0:3,3]
+        v_traj[i*horizon+1:(i+1)*horizon+1] = np.linalg.norm(MPC.plant.eta[:,-1,:],ord=2,axis=-1,keepdims=False)
+    # du = u[1:] - u[:-1]
+    # dq = q[1:] - q[:-1] # (h-1) x dof
+    # q_ = np.vstack((qqq0[None,1:],
+    #                 MPC.Newmark_a[None,:,None]*(q[0] - qqq0[0]),
+    #                 MPC.Newmark_a[:,None]*dq[:,None,:])) # (h+1) x 2 x dof
+    # qd_qdd = np.sum(MPC.Newmark_C@q_, axis=1) # h x 2 x dof
     # qdot = qd_qdd[:,0] # h x dof
     # qddot = qd_qdd[:,1]
 
     # verify Newmark transcription
-    qqq_it = np.zeros((horizon+1,3,MPC.plant.dof))
-    qqq_it[1:,0,:] = q
-    qqq_it[0,:,:] = qqq0
-    for i in range(horizon):
-        hqdot = MPC.plant.Newmark[0]@qqq_it[i]
-        hqddot = MPC.plant.Newmark[1]@qqq_it[i]
-        qqq_it[i+1,1,:] = -MPC.plant.Newmark[0,0]*q[i] + hqdot
-        qqq_it[i+1,2,:] = -MPC.plant.Newmark[1,0]*q[i] + hqddot
-    print("max Newmark error: ",np.max(np.absolute(qd_qdd-qqq_it[1:,1:,:])))
+    # qqq_it = np.zeros((horizon+1,3,MPC.plant.dof))
+    # qqq_it[1:,0,:] = q
+    # qqq_it[0,:,:] = qqq0
+    # for i in range(horizon):
+    #     hqdot = MPC.plant.Newmark[0]@qqq_it[i]
+    #     hqddot = MPC.plant.Newmark[1]@qqq_it[i]
+    #     qqq_it[i+1,1,:] = -MPC.plant.Newmark[0,0]*q[i] + hqdot
+    #     qqq_it[i+1,2,:] = -MPC.plant.Newmark[1,0]*q[i] + hqddot
+    # print("max Newmark error: ",np.max(np.absolute(qd_qdd-qqq_it[1:,1:,:])))
 
-    p_traj = MPC.plant.g[:,:,0:3,3]
+    # p_traj = MPC.plant.g[:,:,0:3,3]
 
-    TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
-    x = TDCR.static_solve(np.array([-5,0]),q[-1])
-    print(q[-1,TDCR.nb:2*TDCR.nb])
-    print(x[TDCR.nb:2*TDCR.nb])
-    TDCR.forward_kinematics(x,np.zeros_like(x))
-    p_static = TDCR.g[0,:,0:3,3]
+    # TDCR = continuumRobot_GVS(MP, model="Kirchhoff")
+    # x = TDCR.static_solve(np.array([-5,0]),q[-1])
+    # print(q[-1,TDCR.nb:2*TDCR.nb])
+    # print(x[TDCR.nb:2*TDCR.nb])
+    # TDCR.forward_kinematics(x,np.zeros_like(x))
+    # p_static = TDCR.g[0,:,0:3,3]
 
     fig,ax = plt.subplots()
-    t = np.linspace(0,horizon,horizon+1)*dt
-    ax.plot(t, np.insert(u[:,0],0,u0[0],axis=0))
-    ax.plot(t, np.insert(u[:,1],0,u0[1],axis=0))
+    t = np.linspace(0,num_step,num_step+1)*dt
+    ax.plot(t, u[:,0])
+    ax.plot(t, u[:,1])
     plt.show()
 
     # fig,ax = plt.subplots(3)
@@ -196,33 +218,71 @@ def main():
 
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    ax.plot(p_static[:,0],p_static[:,1],p_static[:,2])
-    line = ax.plot(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2])
-    points = ax.scatter(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2], s=2, c='y')
+    ax.view_init(elev=16, azim=-103, roll=-94)
+    for frame in range(0,num_step,5):
+        # ax.plot(p_static[:,0],p_static[:,1],p_static[:,2])
+        line = ax.plot(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2],c='b')
+        points = ax.scatter(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2], s=2, c='y')
     ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
+    ax.scatter(p_d[:,0],p_d[:,1],p_d[:,2], s=2, c='k')
     # forces = [ax.quiver(p_traj[0,1:,0],p_traj[0,1:,1],p_traj[0,1:,2],
     #            fc_traj[0,:,0],fc_traj[0,:,1],fc_traj[0,:,2], normalize=False)]
     ax.axis('equal')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.set_zlabel('z')
-    ax.set_zlim([0,0.2])
-    ax.set_aspect('equal')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('z [m]')
+    ax.set_zlim([-0.2,0.6])
+    ax.set_ylim([-0.2,0.2])
+    ax.set_zlim([0,1])
+    
+    def set_axes_equal(ax):
+        '''Make axes of 3D plot have equal scale.'''
+        x_limits = ax.get_xlim3d()
+        y_limits = ax.get_ylim3d()
+        z_limits = ax.get_zlim3d()
 
-    def update(frame):
-        # update the line plot:
-        line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
-        points.set_offsets(p_traj[frame,:,0:2]) # x,y
-        points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
+        x_range = abs(x_limits[1] - x_limits[0])
+        x_middle = np.mean(x_limits)
+        y_range = abs(y_limits[1] - y_limits[0])
+        y_middle = np.mean(y_limits)
+        z_range = abs(z_limits[1] - z_limits[0])
+        z_middle = np.mean(z_limits)
 
-        # forces[0].remove()
-        # forces[0] = ax.quiver(p_traj[frame,1:,0],p_traj[frame,1:,1],p_traj[frame,1:,2],
-        #        fc_traj[frame,:,0],fc_traj[frame,:,1],fc_traj[frame,:,2], normalize=False)
-        # ax.set_aspect('equal')
-        return line, points#, forces[0]
+        max_range = max(x_range, y_range, z_range)
+
+        ax.set_xlim3d([x_middle - max_range/2, x_middle + max_range/2])
+        ax.set_ylim3d([y_middle - max_range/2, y_middle + max_range/2])
+        ax.set_zlim3d([z_middle - max_range/2, z_middle + max_range/2])
+
+    set_axes_equal(ax)
+
+    pos_err = np.linalg.norm(p_d - p_traj[1:,-1,:],ord=2,axis=-1,keepdims=False)
+    np.savez('h1.npz', p_traj=p_traj, v_traj=v_traj, pos_err = pos_err)
+
+    fig,ax = plt.subplots()
+    ax.plot(t,v_traj)
+    ax.set_xlabel('t [s]')
+    ax.set_ylabel('v [m/s]')
+
+    fig,ax = plt.subplots()
+    ax.plot(t,pos_err)
+    ax.set_xlabel('t [s]')
+    ax.set_ylabel('position error [m]')
+
+    # def update(frame):
+    #     # update the line plot:
+    #     line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
+    #     points.set_offsets(p_traj[frame,:,0:2]) # x,y
+    #     points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
+
+    #     # forces[0].remove()
+    #     # forces[0] = ax.quiver(p_traj[frame,1:,0],p_traj[frame,1:,1],p_traj[frame,1:,2],
+    #     #        fc_traj[frame,:,0],fc_traj[frame,:,1],fc_traj[frame,:,2], normalize=False)
+    #     # ax.set_aspect('equal')
+    #     return line, points#, forces[0]
 
 
-    ani = animation.FuncAnimation(fig=fig, func=update, frames=horizon, interval=5)
+    # ani = animation.FuncAnimation(fig=fig, func=update, frames=horizon, interval=5)
     plt.show()
     # writer = animation.PillowWriter(fps=200,
     #                                 metadata=dict(artist='Me'),
