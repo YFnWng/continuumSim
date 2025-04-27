@@ -57,7 +57,8 @@ class Newmark_MPC:
         # qddot = qd_qdd[:,1]
         self.plant.forward_kinematics(q,qdot)
         err = p_d - self.plant.g[:,-1,0:3,3]
-        return self.Q*np.sum(err**2) + self.R*(np.sum((u[0]-u0)**2)+np.sum(du**2))
+        # Ls = np.sum((q[:,None,:]@self.plant.K@qdot[:,:,None])**2)
+        return self.Q*np.sum(err**2) + self.R*(np.sum((u[0]-u0)**2)+np.sum(du**2)) #+ self.S*Ls
 
     def dynamic_constraint(self,x,qqq0):
         q = np.reshape(x[:self.uid], (self.h,-1))
@@ -92,9 +93,9 @@ def main():
     MP = {
         "L": 1.0, # length 0.2
         "r": 0.005, # rod radius 0.001
-        "E": 5e+7, # Young's modulus 200e9
+        "E": 100e+7, # Young's modulus 200e9
         "nu": 0.5, # Poisson's ratio 0.25
-        "rho": 1100, # density 1100
+        "rho": 1100/2, # density 1100
         "Dbt": 5e-3*np.eye(3), # damping 5e-7
         "Dse": 5e-4*np.eye(3), # damping 5e-8
         "usr": np.zeros(3), # natural twist
@@ -107,8 +108,8 @@ def main():
     }
     weights = {
         "Q": 1.0e+3,
-        "R": 0.5,
-        "S": 1.0
+        "R": 0.8,
+        "S": 6.0
     }
     bounds = {
         "qub": 20.0,
@@ -118,8 +119,8 @@ def main():
     }
     
     # TDCR = continuumRobot_GVS(MP, model="Kirchhoff", batch=1)
-    num_step = 60
-    horizon = 1
+    num_step = 150
+    horizon = 6
     session = int(num_step/horizon)
     dt = 15e-3
     t = np.linspace(0,num_step,num_step+1)*dt
@@ -140,11 +141,32 @@ def main():
 
     p_d = np.zeros((num_step,3))
     # p_d[:,2] = 1.0
-    p_d[:,2] = np.concatenate((np.linspace(1.0,0.92,25),np.ones(35)*0.92))
-    p_d[25:,0] = np.linspace(0.0,0.15,35)
+
+    # case 1
+    # p_d[:,2] = np.concatenate((np.linspace(1.0,0.92,25),np.ones(35)*0.92))
+    # p_d[25:,0] = np.linspace(0.0,0.15,35)
+
+    # case 2
+    # t1 = 25
+    # theta = np.linspace(0,np.pi,num_step-t1+1)[1:]
+    # p_d[:t1,0] = np.linspace(0,0.2,t1+1)[1:]
+    # p_d[t1:,0] = 0.2*np.cos(theta)
+    # p_d[t1:,1] = 0.2*np.sin(theta)
+    # p_d[:,2] = 0.99*np.ones(num_step)
+
+    q[0,MPC.plant.nb:(2*MPC.plant.nb)] = 0.42781*np.ones(MPC.plant.nb)
+    u[0,:] = np.array([7.0,0.0])
+    theta = np.linspace(0,np.pi*4/4,num_step+1)[1:]
+    p_d[:,0] = 0.21*np.cos(theta)
+    p_d[:,1] = 0.21*np.sin(theta)
+    p_d[:,2] = 0.97*np.ones(num_step)
 
     p_traj = np.zeros((num_step+1,MPC.plant.ng,3))
     v_traj = np.zeros(num_step+1)
+    MPC.plant.forward_kinematics(q[0:horizon],qdot[0:horizon])
+    p_traj[0] = MPC.plant.g[0,:,0:3,3]
+    # v_traj[0] = np.linalg.norm(MPC.plant.eta[0,-1,0:3],ord=2,axis=-1,keepdims=False)
+    fc_traj = np.zeros((num_step+1,MPC.plant.ng-1,3))
     for i in range(session):
         qqq0 = np.vstack((q[i*horizon],qdot[i*horizon],qddot[i*horizon]))
         u0 = u[i*horizon]
@@ -164,6 +186,9 @@ def main():
 
         p_traj[i*horizon+1:(i+1)*horizon+1] = MPC.plant.g[:,:,0:3,3]
         v_traj[i*horizon+1:(i+1)*horizon+1] = np.linalg.norm(MPC.plant.eta[:,-1,:],ord=2,axis=-1,keepdims=False)
+        FL,fc = contactForce(MPC.plant.g[...,1:,:,:],MPC.plant.eta[...,1:,0:3],MPC.plant.hg[-1])
+        fc_traj[i*horizon+1:(i+1)*horizon+1,:-1] = fc
+        fc_traj[i*horizon+1:(i+1)*horizon+1,-1] = FL
     # du = u[1:] - u[:-1]
     # dq = q[1:] - q[:-1] # (h-1) x dof
     # q_ = np.vstack((qqq0[None,1:],
@@ -216,48 +241,8 @@ def main():
     # ani = animation.FuncAnimation(fig=fig, func=update, frames=200, interval=5)
     # plt.show()
 
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    ax.view_init(elev=16, azim=-103, roll=-94)
-    for frame in range(0,num_step,5):
-        # ax.plot(p_static[:,0],p_static[:,1],p_static[:,2])
-        line = ax.plot(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2],c='b')
-        points = ax.scatter(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2], s=2, c='y')
-    ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
-    ax.scatter(p_d[:,0],p_d[:,1],p_d[:,2], s=2, c='k')
-    # forces = [ax.quiver(p_traj[0,1:,0],p_traj[0,1:,1],p_traj[0,1:,2],
-    #            fc_traj[0,:,0],fc_traj[0,:,1],fc_traj[0,:,2], normalize=False)]
-    ax.axis('equal')
-    ax.set_xlabel('x [m]')
-    ax.set_ylabel('y [m]')
-    ax.set_zlabel('z [m]')
-    ax.set_zlim([-0.2,0.6])
-    ax.set_ylim([-0.2,0.2])
-    ax.set_zlim([0,1])
-    
-    def set_axes_equal(ax):
-        '''Make axes of 3D plot have equal scale.'''
-        x_limits = ax.get_xlim3d()
-        y_limits = ax.get_ylim3d()
-        z_limits = ax.get_zlim3d()
-
-        x_range = abs(x_limits[1] - x_limits[0])
-        x_middle = np.mean(x_limits)
-        y_range = abs(y_limits[1] - y_limits[0])
-        y_middle = np.mean(y_limits)
-        z_range = abs(z_limits[1] - z_limits[0])
-        z_middle = np.mean(z_limits)
-
-        max_range = max(x_range, y_range, z_range)
-
-        ax.set_xlim3d([x_middle - max_range/2, x_middle + max_range/2])
-        ax.set_ylim3d([y_middle - max_range/2, y_middle + max_range/2])
-        ax.set_zlim3d([z_middle - max_range/2, z_middle + max_range/2])
-
-    set_axes_equal(ax)
-
     pos_err = np.linalg.norm(p_d - p_traj[1:,-1,:],ord=2,axis=-1,keepdims=False)
-    np.savez('h1.npz', p_traj=p_traj, v_traj=v_traj, pos_err = pos_err)
+    np.savez('data/stiff_h6_free.npz', p_traj=p_traj, v_traj=v_traj, q_traj=q, pos_err = pos_err, u=u)
 
     fig,ax = plt.subplots()
     ax.plot(t,v_traj)
@@ -265,29 +250,52 @@ def main():
     ax.set_ylabel('v [m/s]')
 
     fig,ax = plt.subplots()
-    ax.plot(t,pos_err)
+    ax.plot(t[1:],pos_err)
     ax.set_xlabel('t [s]')
     ax.set_ylabel('position error [m]')
-
-    # def update(frame):
-    #     # update the line plot:
-    #     line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
-    #     points.set_offsets(p_traj[frame,:,0:2]) # x,y
-    #     points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
-
-    #     # forces[0].remove()
-    #     # forces[0] = ax.quiver(p_traj[frame,1:,0],p_traj[frame,1:,1],p_traj[frame,1:,2],
-    #     #        fc_traj[frame,:,0],fc_traj[frame,:,1],fc_traj[frame,:,2], normalize=False)
-    #     # ax.set_aspect('equal')
-    #     return line, points#, forces[0]
-
-
-    # ani = animation.FuncAnimation(fig=fig, func=update, frames=horizon, interval=5)
     plt.show()
-    # writer = animation.PillowWriter(fps=200,
-    #                                 metadata=dict(artist='Me'),
-    #                                 bitrate=1800)
-    # ani.save(filename="/continuumSim/figures/rod_slipping.gif", writer=writer)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    # ax.view_init(elev=16, azim=-103, roll=-94)
+    ax.view_init(elev=39, azim=-117, roll=-107)
+    # for frame in range(0,num_step,5):
+    #     # ax.plot(p_static[:,0],p_static[:,1],p_static[:,2])
+    #     line = ax.plot(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2],c='b')
+    #     points = ax.scatter(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2], s=2, c='y')
+    # ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
+    ax.scatter(p_d[:,0],p_d[:,1],p_d[:,2], s=2, c='k')
+
+
+    line = ax.plot(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2],c='b')
+    points = ax.scatter(p_traj[0,:,0],p_traj[0,:,1],p_traj[0,:,2], s=2, c='y')
+    forces = [ax.quiver(p_traj[0,1:,0],p_traj[0,1:,1],p_traj[0,1:,2],
+               fc_traj[0,:,0],fc_traj[0,:,1],fc_traj[0,:,2], normalize=False)]
+    
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('z [m]')
+    ax.set_xlim([-0.5,0.5])
+    ax.set_ylim([-0.5,0.5])
+    ax.set_zlim([0,1])
+    ax.axis('equal')
+
+    def update(frame):
+        # update the line plot:
+        line[0].set_data_3d(p_traj[frame,:,0],p_traj[frame,:,1],p_traj[frame,:,2])
+        points.set_offsets(p_traj[frame,:,0:2]) # x,y
+        points.set_3d_properties(p_traj[frame,:,2],zdir='z') # z
+
+        forces[0].remove()
+        forces[0] = ax.quiver(p_traj[frame,1:,0],p_traj[frame,1:,1],p_traj[frame,1:,2],
+               fc_traj[frame,:,0],fc_traj[frame,:,1],fc_traj[frame,:,2], normalize=False)
+        ax.set_aspect('equal')
+        return line, points, forces[0]
+
+
+    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=int(dt*1e3))
+    plt.show()
+    ani.save(filename="figures/stiff_h6_free.mp4", writer='ffmpeg', bitrate=1800, dpi=800)
 
 if __name__ == "__main__":
     main()

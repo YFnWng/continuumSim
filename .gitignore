@@ -1,4 +1,6 @@
 playground.*
 
+data/
+figures/
 # all folders starting with _ are local
 _*/

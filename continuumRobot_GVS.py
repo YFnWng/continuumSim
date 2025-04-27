@@ -136,7 +136,7 @@ class continuumRobot_GVS:
         self.Ksevsr = self.Kse@MP["vsr"]
 
         # g = np.array([0,0,-9.8])
-        g = np.array([9.8,0,0])
+        g = np.array([0,0,0])
         self.rho = MP["rho"]
         self.rhoAg = self.rho*A*g
         self.rhoA  = self.rho*A
@@ -150,18 +150,18 @@ class continuumRobot_GVS:
         self.udof = int(np.shape(self.rt)[-1]/2)
 
         # Generalized stiffness matrix
-        self.K = np.sum(self.wq[:,None,None]*self.BqT@self.Ks[None,...]@self.Bq, axis=0)
+        self.K = self.L*np.sum(self.wq[:,None,None]*self.BqT@self.Ks[None,...]@self.Bq, axis=0)
         # Generalized damping matrix
-        self.D = np.sum(self.wq[:,None,None]*self.BqT@self.Ds[None,...]@self.Bq, axis=0)
+        self.D = self.L*np.sum(self.wq[:,None,None]*self.BqT@self.Ds[None,...]@self.Bq, axis=0)
         
-        # controllables
+        # controllables 
         self.tau = np.zeros_like(self.rt[0])
         self.R0 = np.eye(3)
         self.p0 = np.zeros(3)
 
         # external loads
         self.FL = np.zeros(3)
-        # self.FL = np.array([1,0,0])
+        # self.FL = np.array([3,0,0])
         self.ML = np.zeros(3)
         # self.ML = np.array([0,0.3,0])
         self.WL = np.concatenate((self.FL,self.ML))
@@ -342,6 +342,7 @@ class continuumRobot_GVS:
         # Generalized external load
         FL,fc = contactForce(self.g[...,1:,:,:],self.eta[...,1:,0:3],self.hg[-1])
         fc  = self.rhoAg@self.g[...,1:-1,0:3,0:3] + fc # batch x nq x 3
+        # fc  = self.rhoAg + fc # batch x nq x 3
         FL = FL + self.FL@self.g[...,-1,0:3,0:3]
         w = np.concatenate((fc,np.zeros_like(fc)),axis=-1)
         # self.f = np.sum(wq*JT@w[...,None], axis=-3) + \
@@ -351,8 +352,8 @@ class continuumRobot_GVS:
                     
         tau = np.concatenate((u,-u), axis=-1)
 
-        return (self.M@qddot[...,None] + (self.C+self.L*self.D)@qdot[...,None] + 
-                          self.L*self.K@q[...,None] - self.A@tau[...,None] - self.f).flatten()
+        return (self.M@qddot[...,None] + (self.C+self.D)@qdot[...,None] + 
+                          self.K@q[...,None] - self.A@tau[...,None] - self.f).flatten()
     
     # def Cosserat_dynamic_residual(self, q, qdot, qddot, u):
     #     # Mqdd + (C+D)qd + Kq = Au + f
@@ -438,7 +439,7 @@ class continuumRobot_GVS:
 
         tau = np.concatenate((u,-u), axis=-1)
 
-        return (self.L*self.K@q[...,None] - (self.A@tau[...,None] + self.f)).flatten()
+        return (self.K@q[...,None] - (self.A@tau[...,None] + self.f)).flatten()
     
     def static_solve(self, u, ig):
         sol = root(lambda q: self.Cosserat_static_residual(q,u), x0=ig, tol=1e-12)
@@ -463,7 +464,9 @@ class continuumRobot_GVS:
         t_eval = np.linspace(t_span[0],t_span[1],num_step+1)
         q_traj = np.zeros((self.batch,num_step+1,3,self.dof))
         p_traj = np.zeros((self.batch,num_step+1,self.ng,3))
+        v_traj = np.zeros(num_step+1)
         q_traj[:,0] = self.qqq
+        self.forward_kinematics(q_traj[0,0,0,:],q_traj[0,0,1,:])
         p_traj[:,0] = self.g[...,0:3,3]
         fc_traj = np.zeros((self.batch,num_step+1,self.ng-1,3))
         Ek = np.zeros(num_step)
@@ -485,11 +488,12 @@ class continuumRobot_GVS:
                 q_traj[:,i+1] = self.qqq
                 self.forward_kinematics(q, qdot)
                 p_traj[:,i+1] = self.g[...,:,0:3,3]
+                v_traj[i+1] = np.linalg.norm(self.eta[0,-1,:],ord=2,keepdims=False)
                 self.hqdot = self.Newmark[0]@self.qqq
                 self.hqddot = self.Newmark[1]@self.qqq
 
                 fc_traj[:,i+1,-1,:],fc_traj[:,i+1,:-1,:] = contactForce(self.g[...,1:,:,:],self.eta[...,1:,0:3],1)
-                # fc_traj[:,i+1,:-1,:] = fc_traj[:,i+1,:-1,:] + self.rhoAg
+                # fc_traj[:,i+1,:-1,:] = fc_traj[:,i+1,:-1,:] + self.g[:,1:-1,0:3,0:3]@self.rhoAg
 
                 J = self.J[...,1:-1,:,:]
                 JT = np.swapaxes(J,-1,-2)
@@ -499,7 +503,7 @@ class continuumRobot_GVS:
                 Ep[i] = -self.rhoAg[0]*np.sum(wq*self.g[0,1:-1,0,3]) - self.FL[0]*self.g[0,-1,0,3]
                 Ee[i] = self.L*q@self.K@q.T/2
 
-        return t_eval, q_traj, p_traj, fc_traj, Ek, Ep, Ee
+        return t_eval, q_traj, p_traj, v_traj, fc_traj, Ek, Ep, Ee
 
     
     def strong_form_dynamics(self, q, qdot):
@@ -604,7 +608,7 @@ class continuumRobot_GVS:
 
 
 def main():
-    delta = 0.005 # tendon offset 0.015
+    delta = 0.015 # tendon offset 0.015
     MP = {
         "L": 1.0, # length 0.2
         "r": 0.005, # rod radius 0.001
@@ -647,14 +651,16 @@ def main():
     # TDCR.tau = np.array([20,0,0,0])
     # TDCR.tau = np.zeros(4)
     # t0 = time.time()
-    # x = TDCR.static_solve(np.array([1,0]), q)
+    # x = TDCR.static_solve(np.array([7,0]), q)
+    # TDCR.forward_kinematics(x,np.zeros_like(x))
+    # print(x)
     # t1 = time.time()
     # print(t1-t0)
     # print(x)
     # dy = TDCR.Cosserat_dynamic_ODE(0,np.concatenate((q,qdot)))
     # TDCR.forward_kinematics(q,dy[TDCR.dof:]*1e-3)
 
-    t, q_traj, p_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(u=np.array([0,0]),t_span=np.array([0,1.0]))
+    t, q_traj, p_traj, v_traj, fc_traj, Ek, Ep, Ee = TDCR.roll_out(u=np.array([0,0]),t_span=np.array([0,1.0]))
 
     # x = TDCR.static_solve(np.array([100,0,0,0]), q)
     # x = TDCR.static_solve(np.array([0,0,0,0]), q) # zero!
@@ -662,6 +668,26 @@ def main():
     # etadots = TDCR.strong_form_dynamics(q,qdot)
     # t1 = time.time()
     # print(t1-t0)
+
+    # p = TDCR.g[0,:,0:3,3]
+    # print(p[-1])
+    # fig = plt.figure()
+    # ax = fig.add_subplot(projection='3d')
+    # ax.view_init(elev=16, azim=-103, roll=-94)
+    # line = ax.plot(p[:,0],p[:,1],p[:,2],c='b')
+    # points = ax.scatter(p[:,0],p[:,1],p[:,2], s=2, c='y')
+    # # forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
+    # #            fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
+    # ax.set_xlabel('x [m]')
+    # ax.set_ylabel('y [m]')
+    # ax.set_zlabel('z [m]')
+    # ax.set_zlim3d([-0.2,0.6])
+    # ax.set_ylim3d([-0.2,0.2])
+    # ax.set_zlim3d([0,1])
+    # ax.axis('equal')
+    # plt.show()
+
+    # np.savez('data/no_control_soft.npz', p_traj=p_traj, v_traj=v_traj, q_traj=q_traj)
 
     num_step = np.shape(Ek)[0]
 
@@ -689,22 +715,27 @@ def main():
         qdline[0].set_ydata(xi_traj[0,frame,1,:,4])
         qddline[0].set_ydata(xi_traj[0,frame,2,:,4])
         return qline,qdline,qddline
-    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
+    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=15)
     plt.show()
 
     # workspace simulation
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     ax.view_init(elev=16, azim=-103, roll=-94)
+
     print(num_step)
-    for frame in range(0,num_step,5):
-        # print(frame)
-        line = ax.plot(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2],c='b')
-        points = ax.scatter(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2], s=2, c='y')
+    # for frame in range(0,num_step,5):
+    #     # print(frame)
+    #     line = ax.plot(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2],c='b')
+    #     points = ax.scatter(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2], s=2, c='y')
     ax.plot_surface(cylinder_x,cylinder_y,cylinder_z, alpha=0.5, color='r')
     # line = ax.plot(p[:,0],p[:,1],p[:,2])
-    # forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
-    #            fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
+    
+
+    line = ax.plot(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2],c='b')
+    points = ax.scatter(p_traj[0,0,:,0],p_traj[0,0,:,1],p_traj[0,0,:,2], s=2, c='y')
+    forces = [ax.quiver(p_traj[0,0,1:,0],p_traj[0,0,1:,1],p_traj[0,0,1:,2],
+               fc_traj[0,0,:,0],fc_traj[0,0,:,1],fc_traj[0,0,:,2], normalize=False)]
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
     ax.set_zlabel('z [m]')
@@ -713,28 +744,25 @@ def main():
     ax.set_zlim3d([0,1])
     ax.axis('equal')
     
-    plt.show()
+    # plt.show()
     # print(line[0].get_data_3d())
 
-    # def update(frame):
-    #     # update the line plot:
-    #     line[0].set_data_3d(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2])
-    #     points.set_offsets(p_traj[0,frame,:,0:2]) # x,y
-    #     points.set_3d_properties(p_traj[0,frame,:,2],zdir='z') # z
+    def update(frame):
+        # update the line plot:
+        line[0].set_data_3d(p_traj[0,frame,:,0],p_traj[0,frame,:,1],p_traj[0,frame,:,2])
+        points.set_offsets(p_traj[0,frame,:,0:2]) # x,y
+        points.set_3d_properties(p_traj[0,frame,:,2],zdir='z') # z
 
-    #     # forces[0].remove()
-    #     # forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
-    #     #        fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
-    #     # ax.set_aspect('equal')
-    #     return line, points#, forces[0]
+        forces[0].remove()
+        forces[0] = ax.quiver(p_traj[0,frame,1:,0],p_traj[0,frame,1:,1],p_traj[0,frame,1:,2],
+               fc_traj[0,frame,:,0],fc_traj[0,frame,:,1],fc_traj[0,frame,:,2], normalize=False)
+        ax.set_aspect('equal')
+        return line, points, forces[0]
 
 
-    # ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=5)
-    # plt.show()
-    # writer = animation.PillowWriter(fps=200,
-    #                                 metadata=dict(artist='Me'),
-    #                                 bitrate=1800)
-    # ani.save(filename="/continuumSim/figures/rod_slipping.gif", writer=writer)
+    ani = animation.FuncAnimation(fig=fig, func=update, frames=num_step, interval=15)
+    plt.show()
+    ani.save(filename="figures/soft_nocontrol_60.mp4", writer='ffmpeg', bitrate=1800, dpi=800,fps=60,codec='h264')
 
 if __name__ == "__main__":
     main()

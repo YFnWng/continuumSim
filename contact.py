@@ -1,9 +1,9 @@
 import numpy as np
 
-def Ycylinder_SDF(p,center,radius):
+def cylinder_SDF(p,center,radius,axis):
     # a cylinder parallel to Y-axis
     vc = p - center
-    vc[...,1] = 0
+    vc[...,axis] = 0
     dc = np.linalg.norm(vc, ord=2, axis=-1, keepdims=True)
     d = dc - radius
     n = np.divide(vc, dc, out=np.zeros_like(vc), where=dc>0)
@@ -38,9 +38,20 @@ def data_for_Ycylinder(center_x,center_z,radius,height):
     z_grid = radius*np.sin(theta_grid) + center_z
     return x_grid,y_grid,z_grid
 
+def data_for_Zcylinder(center_x,center_y,center_z,radius,height):
+    z = np.linspace(-height, height, 3) + center_z
+    theta = np.linspace(0, 2*np.pi, 18)
+    theta_grid, z_grid=np.meshgrid(theta, z)
+    x_grid = radius*np.cos(theta_grid) + center_x
+    y_grid = radius*np.sin(theta_grid) + center_y
+    return x_grid,y_grid,z_grid
+
 # environment setup
-cylinder_c = [0.05,0,0.92]
+# cylinder_c = [0.05,0,0.92]
+# cylinder_c = [0.0,0.18,0.97]
+cylinder_c = [0.08,0.0,0.99]
 cylinder_r = 0.05
-SDF = lambda p : Ycylinder_SDF(p,center=cylinder_c,radius=cylinder_r)
-contactForce = lambda g, bpt, ds: contact_force(g,bpt,ds,k=5000,alpha=5e-6,mu=0.1,sigma=0.001,SDF=SDF)
-cylinder_x,cylinder_y,cylinder_z = data_for_Ycylinder(cylinder_c[0],cylinder_c[2],radius=cylinder_r,height=0.1)
+SDF = lambda p : cylinder_SDF(p,center=cylinder_c,radius=cylinder_r,axis=1)
+contactForce = lambda g, bpt, ds: contact_force(g,bpt,ds,k=0,alpha=5e-6,mu=0.1,sigma=0.001,SDF=SDF) #600
+cylinder_x,cylinder_y,cylinder_z = data_for_Ycylinder(cylinder_c[0],cylinder_c[2],radius=cylinder_r,height=0.3)
+# cylinder_x,cylinder_y,cylinder_z = data_for_Zcylinder(cylinder_c[0],cylinder_c[1],cylinder_c[2],radius=cylinder_r,height=0.3)
